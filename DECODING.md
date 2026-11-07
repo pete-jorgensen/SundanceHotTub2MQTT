@@ -410,3 +410,65 @@ Nothing in the decode covers error or diagnostic codes (flow switch, high limit,
 fault). A tub with a fault shows it on the panel, so the code exists somewhere on the wire —
 most likely in `f13` or a `f2` bit. Nothing has been captured with the tub in a fault state, and
 provoking one deliberately is not proposed.
+
+---
+
+## 7. Cross-model field map: 780, 680, Montclair
+
+One table, one row per field (or bit), one column per board. **Only what has been checked on that
+board is written in its column**; everything else is `unknown`. Nothing is copied from one board to
+another. Statuses: ✅ confirmed on that board; 🟡 hypothesis (a few observations); ❓ unknown or never
+seen. Open questions stay as hypotheses (🟡/❓) until a capture confirms them.
+
+The fold and checksum are the same on every board seen so far (`a ^ b ^ 1` per pair; CRC-8 poly
+0x07, preload 0xB5, final XOR 0x02), so the field numbers below are post-fold.
+
+Boards and sources:
+
+- **780** — the cells below were taken from this document (§2, §3) and the author's replies;
+  *to be checked against the 780 captures* (marked "per §").
+- **680** — Sundance 680 series, Peyton 2020, controller P/N 6600-158, board PN 24168_C. Source:
+  [GalKar83/sundance-rs485-controller](https://github.com/GalKar83/sundance-rs485-controller), README
+  §5–§9; checked on the spa, dates in brackets.
+- **Montclair** — only the fields decodable from the three frames in issue #5 (one capture); the rest
+  is `unknown`.
+
+| Field | 780 | 680 | Montclair |
+|---|---|---|---|
+| **f0** | hour `^ 6` ✅ (per §2) | hour `^ 6` ✅ | hour `^ 6` ✅ (issue #5, one capture) |
+| **f1** b2 | pump 2 ✅ (per §2) | Jet 2 running ✅ | unknown |
+| **f1** b3 | unknown | **Access Lock** active ✅ (2026-10) | unknown |
+| **f1** b5 | lags circulation, unnamed 🟡 (per §6.1) | Jet 1 low speed **commanded**; leads b6 by ~1 s 🟡 | unknown |
+| **f1** b6 | lags circulation, unnamed 🟡 (per §6.1) | Jet 1 low speed **running**, any reason ✅ | unknown |
+| **f1** b7 | manual circulation ✅ (per §3.1) | manual circulation (Jet 1 low started by the circulation button) ✅ | unknown |
+| **f1** b0, b1, b4 | unknown | never set ❓ | unknown |
+| **f2** b0–b2 | weekday, Sunday = 0 ✅ (author, 424 frames) | weekday, Sunday = 0 ✅ (22–25 Oct 2026, power-up date; Saturday 7 Nov = 6; with the date set to Wednesday 8 Jul 2026 = 3) | unknown |
+| **f2** b3 | unknown | Jet 1 low speed (pump side) ✅ | unknown |
+| **f2** b4 | pump 1 ✅ (per §2) | Jet 1 high speed ✅ | unknown |
+| **f2** b5 | unknown | a menu value is being **edited** ✅ (2026-10) | unknown |
+| **f2** b6 | unknown | never set ❓ | unknown |
+| **f2** b7 | unknown | set while **Water Refresh is Off**, and after a power loss until the clock is set ✅ | unknown |
+| **f3** | Filter Change days, `f3 ^ 250`; 250 = 0 ✅ (author, menu walk) | Filter Change days, `f3 ^ 250`; raw 250 means Off **or** due ✅ | unknown |
+| **f4** | b6 = circulation pump running (either mode); rest constant `0b101` ✅ (per §3.1) | constant 6; no separate circulation pump on this model 🟡 | unknown |
+| **f5** | water temperature `^ 2`, °F ✅ (per §2) | water temperature `^ 2`; half °C in °C mode, whole °F in °F mode ✅ | `^ 2`, half °C (×2) ✅ (issue #5) |
+| **f6** | heat mode 32 Auto, 34 Eco, 36 Day ✅ (per §2) | 32 Auto, 34 Eco, 36 Day ✅ (16 for under 1 s at power-up) | unknown |
+| **f7** | `(day << 3) XOR month` ✅ (author) | `(day << 3) XOR month` ✅ (8 Jul 2026 set on the spa, 2026-11-07); ambiguous, e.g. 22 Oct and 23 Feb both 186 | unknown |
+| **f8** | set point, °F ✅ (per §2) | set point; half °C or whole °F ✅ | half °C (×2) ✅ (issue #5) |
+| **f9** | year − 2000, **no XOR** ✅ (author) | year − 2000 **XOR 1** ✅ (2026; power-up default reads 2014) | year − 2000, no XOR ✅ (issue #5: 26) |
+| **f10** b4 | unknown | **Temperature Lock** active ✅ (2026-10) | unknown |
+| **f10** b6 | heater on ✅ (per §2) | heater on ✅ | unknown |
+| **f10** b7 | automatic circulation ✅ (per §3.1) | scheduled filtration cycle (including the daily cleanup) and the power-up purge ✅ | unknown |
+| **f10** b0–b3, b5 | unknown | never set ❓ (candidates: alerts or faults) | unknown |
+| **f11** | minute ✅ (per §2) | b0–b6 minute ✅; b7 never set ❓ | minute ✅ (issue #5) |
+| **f12** | Water Refresh days, plain ✅ (author) | Water Refresh days, plain; 0 = Off or due (f2 b7 tells them apart) ✅ | unknown |
+| **f13** | panel state XOR the UV (ClearRay) days ✅ (author) | screen code XOR key; key = (ClearRay days & 0xFF) XOR 78, so the main screen reads as the low byte of the counter ✅ (set on the spa 2026-10-31; counter above 255 checked) | unknown |
+| **f14** | second temperature-like value 🟡 (per §3.4) | slow value V (about −1 per hour idle, rises while the pump runs; meaning unknown ❓) XOR flags: b1 flips with the Settings Lock and b2 with the Service Lock (seen as a flip within 5 s of the panel event, 2026-10-25; the absolute lock state cannot be read from f14 alone because V is unknown), b5 flips while the pump runs, b6 = °F ✅; b7 never seen | unknown |
+| **f15** | constant 0 in the captures (no menu use) | value shown on the current menu screen; encoding depends on the screen ✅ | unknown |
+| **frame** | status payload as documented | whether a 33rd payload byte exists (the fold reads 32): not inspected ❓ | payload four bytes longer (per the pybalboa proposal) |
+| **0xCC** | codes seen: 228 Jets 1, 229 Jets 2 (decoded from §5b) 🟡 | idle 224; Warmer 225, Cooler 226, Jets 1 228, Jets 2 229, Circulation 239, light 241/242, Menu 254, Menu held 209 ✅ | unknown |
+| **0xCA** | brightness 1, mode 4, B 2, G 6, R 8, cycle time 9 (per the bridge code); layout partly guessed (§3.5) | same positions ✅ (30 Oct 2026 light-cycle test): L1 100 on / 0 off (no brightness steps), L4 mode, L2 = blue, L6 = green, L8 = red, 0–255 per mode (Blue 2: L2 255; Green 3: L6 255; Red 6: L8 255; Violet 7: L2 = L8 = 127); L9 blend speed (2 fast, 4 slow); L0 = 189, L3 = 100, L5 = 255 constant; L7 0 so far ❓ | unknown |
+
+Differences worth noting between models: f9 (the extra XOR on the 680), f4 (the circulation pump
+bit, absent on the 680), and the temperature units (half °C on the 680 and the Montclair, whole °F
+on the 780 captures). The 680 has no separate circulation pump, one light button with ten modes, and
+Jet 1 is a two-speed pump.
