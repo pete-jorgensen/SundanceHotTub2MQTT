@@ -237,6 +237,21 @@ class BalboaSpaWifi:
             await self.writer.wait_closed()
         await self.int_new_data_cb()
 
+    def _drop_link(self):
+        """Give up on the current link AND close our end of it.
+
+        The gateway can hold a stale connection slot: while the event loop
+        still holds the transport, the kernel keeps the TCP session up and
+        answers the gateway's keepalives. An EW11 serving `maxAccept 2` with
+        `Timeout 0` counts such a session against its two client slots
+        forever, and with both held it accepts every new connection and
+        closes it at once. So every dead-link path aborts the transport,
+        which frees the slot.
+        """
+        self.connected = False
+        if self.writer is not None:
+            self.writer.transport.abort()
+
     async def int_new_data_cb(self):
         """ Internal new data callback.
         Binds to self.new_data_cb()
@@ -720,12 +735,12 @@ class BalboaSpaWifi:
                 self.log.error(
                     'No data from spa for {0}s, treating connection as dead'.format(
                         self.read_timeout))
-                self.connected = False
+                self._drop_link()
                 await self.int_new_data_cb()
                 return None
             except asyncio.IncompleteReadError:
                 self.log.error('Spa closed the connection (EOF)')
-                self.connected = False
+                self._drop_link()
                 await self.int_new_data_cb()
                 return None
             except SocketError as err:
@@ -737,12 +752,12 @@ class BalboaSpaWifi:
                     self.log.error('Broken pipe')
                 else:
                     self.log.error('Spa socket error: {0}'.format(str(err)))
-                self.connected = False
+                self._drop_link()
                 await self.int_new_data_cb()
                 return None
             except Exception as e:
                 self.log.error('Spa read failed: {0}'.format(str(e)))
-                self.connected = False
+                self._drop_link()
                 await self.int_new_data_cb()
                 return None
             if header[0] == M_STARTEND:
@@ -768,7 +783,7 @@ class BalboaSpaWifi:
                 self.reader.readexactly(rlen), timeout=self.read_timeout)
         except Exception as e:
             self.log.error('Spa read failed: {0}'.format(str(e)))
-            self.connected = False
+            self._drop_link()
             await self.int_new_data_cb()
             return None
 

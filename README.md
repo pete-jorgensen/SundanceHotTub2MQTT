@@ -20,10 +20,6 @@ flowchart LR
 
 ## What it does
 
-![The bridge's device page in Home Assistant — the climate control, switches and sensors,
-all created by MQTT discovery](img/home-assistant.png)
-
-
 The spa's topside panel talks to the mainboard over a multi-drop RS485 bus using a
 Balboa-derived, XOR-obfuscated ("encrypted") protocol. The bridge:
 
@@ -32,14 +28,18 @@ Balboa-derived, XOR-obfuscated ("encrypted") protocol. The bridge:
    so the mainboard treats it like another control panel.
 3. **Decodes** the status traffic: current and set temperature, heater state, pumps,
    circulation (off / auto / manual), lights and colours, clock, date, heat mode, the panel
-   alert and its day count, a second temperature sensor.
+   screen, the filter / UV / water-change service days, a second temperature sensor.
 4. **Publishes** that state over MQTT using Home Assistant discovery, so the entities appear
    with no YAML.
 5. **Accepts commands** back over MQTT (set point, pumps, circulation button, lights) and
    applies them by emulating panel button presses on the bus, with retry and confirmation.
+   The **spa clock and date** are set the same way, by walking the panel's menus screen by
+   screen and checking each step against what the panel reports (`pybalboa/panel_menu.py`).
 6. **Stays connected** — a read timeout detects a stalled or half-open link, the availability
    topic flips to `offline`, and the bridge reconnects and re-negotiates its channel; the listen
-   loop is supervised so an unexpected error restarts it rather than killing the process.
+   loop is supervised so an unexpected error restarts it rather than killing the process. On the
+   MQTT side every connect, including paho's automatic reconnects, re-subscribes to the command
+   topics, so a broker restart cannot leave the bridge publishing state while deaf to commands.
 
 ### Home Assistant entities
 
@@ -52,15 +52,19 @@ Created by discovery under the `homeassistant/` prefix, device **hottub**:
 | ManualCircPump | `switch` | The ClearRay / manual circulation button |
 | CirculationPump | `binary_sensor` | Circulation pump running (either mode) |
 | Lights | `light` | On/off, brightness 0–100, effect = colour mode |
-| Spa clock, spa date, heat mode, second temperature, circulation mode, auto / manual circulation, panel alert + day count, light cycle time | `sensor` / `binary_sensor` | Read-only |
+| Spa clock, spa date, heat mode, second temperature, circulation mode, auto / manual circulation, light cycle time, panel screen | `sensor` / `binary_sensor` | Read-only |
+| Set Spa Time, Set Spa Date | `text` | Show the spa's clock / date; type `HH:MM` or `YYYY-MM-DD` to set it through the panel menus. The time can't yet be moved across noon or midnight, or to/from 11–12 o'clock (`DECODING.md` §4) |
+| Sync Spa Clock | `button` | Sets the spa's date and time to now in `SPA_TZ` |
+| Filter Change Days, UV Change Days, Water Change Days | `number` | The service timers; set them here (FC and UV move in 10-day steps, H2O in 30 — a value between steps lands on the nearest) |
+| Panel Menu Status | `sensor` | Diagnostic: queued / running / done, read-back, or why a request was refused |
 | Raw undecoded protocol fields | `sensor` | Diagnostic, disabled by default — for answering long-baseline questions from the recorder |
 
 Light effects: Off, White, Blue, Violet, Red, Amber, Green, Aqua, Slow Blend, Fast Blend,
 Frozen Blend. Heat modes decoded: AUTO, ECO, DAY.
 
 **Only Sundance tubs.** Jacuzzi tubs emit a different, plaintext message family (`0x16` /
-`0x17` / `0x23`); earlier versions routed those through the Sundance XOR decoder and produced
-plausible nonsense. They now raise an "Unknown Message" warning instead. The evidence is in
+`0x17` / `0x23`); run through the Sundance XOR decoder they produce plausible nonsense, so they
+raise an "Unknown Message" warning instead. The evidence is in
 [`DECODING.md`](DECODING.md) §3.9 for anyone who wants to write a real Jacuzzi parser.
 
 ## The hardware it runs on
@@ -86,8 +90,12 @@ All settings are environment variables; the defaults are placeholders.
 | `SERIAL_IP` | Address of the RS485→TCP gateway | `spa-bridge.local` |
 | `SERIAL_PORT` | TCP port of the gateway | `8899` |
 | `MQTT_HOST` | MQTT broker | `mqtt.local` |
-| `MQTT_PORT` | MQTT port | `1883` |
+| `MQTT_PORT` | MQTT port | `8883` with TLS, else `1883` |
+| `MQTT_TLS` | `1` to connect over TLS, verifying the broker's certificate — so `MQTT_HOST` must be the name on it | unset |
+| `MQTT_CA_FILE` | CA bundle for a privately-issued broker certificate; unset uses the system trust store | unset |
 | `MQTT_USER` / `MQTT_PASSWORD` | Broker credentials; leave unset for an anonymous broker | unset |
+| `SPA_TZ` | IANA time zone for **Sync Spa Clock**, e.g. `Europe/London` (the container clock is UTC) | unset — the button refuses |
+| `RAW_FRAME_LOG` | Path to record every bus frame's raw bytes as JSON lines (rotating, 5 × 20 MB; `RAW_FRAME_LOG_BYTES` / `_FILES`). For decoding work — mount a volume for it | unset — off |
 
 Docker:
 
@@ -111,7 +119,11 @@ On start the log shows the channel handshake, then a decoded status line each ti
 unknown field changes. Within a minute the **hottub** device appears in Home Assistant under
 MQTT. `docker logs hottub` is also the input for the analysis tools in `tools/`.
 
-Offline parser check, no spa needed: `python3 tools/test_decode.py`.
+Offline parser check, no spa needed: `python3 tools/test_decode.py`. Commands surviving a broker
+restart, no broker needed: `python3 tools/test_resubscribe.py` (with `paho-mqtt<2.0` installed).
+A new command dropping presses still queued for the old one: `python3 tools/test_commands.py`.
+The menu driver against a simulated panel (dropped presses, either hour encoding, a person
+pressing MENU mid-job): `python3 tools/test_menu.py`.
 
 ## Layout
 
@@ -119,23 +131,26 @@ Offline parser check, no spa needed: `python3 tools/test_decode.py`.
 | --- | --- |
 | `pybalboa/app.py` | The bridge: MQTT discovery, state publishing, command handling |
 | `pybalboa/sundanceRS485.py` | `SundanceRS485` — channel negotiation, frame decoding, button emulation |
+| `pybalboa/panel_menu.py` | Setting the clock and date by walking the panel menus — closed-loop, no I/O |
 | `pybalboa/balboa.py` | Upstream `BalboaSpaWifi` base class |
 | `pybalboa/__main__.py`, `pybalboa/testSundanceRS485.py` | Console read-outs for poking at a live tub |
 | `DECODING.md` | The protocol record: every field, its confidence, the evidence, open questions |
 | `tools/` | Log analysis scripts and the offline decode test (`tools/README.md`) |
 | `Dockerfile`, `requirements.txt` | `python:alpine` + `paho-mqtt` |
 
-## Relation to upstream
+## Where the code came from
 
-This is a fork of [garbled1/pybalboa](https://github.com/garbled1/pybalboa), which speaks to
-Balboa's Wi‑Fi module over TCP. That code survives as `balboa.py` and the framing, checksum
-and connection handling. Everything Sundance-specific is added on top in `sundanceRS485.py`:
-the RS485 channel-assignment handshake that lets a third device join the panel bus, the XOR
-fold and field map for the `0xC4` status and `0xCA` light frames, and control by emulated
-panel button presses (`0xCC`) because the upstream settings messages are not accepted on this
-bus. `app.py` is new: upstream is a library, this is an MQTT service for Home Assistant. The
-decoding is documented in `DECODING.md` rather than in the code alone. The `main` branch
-mirrors upstream; `master` is this project.
+This began as a fork of [garbled1/pybalboa](https://github.com/garbled1/pybalboa), which
+speaks to Balboa's Wi‑Fi module over TCP. That code survives as `balboa.py` and the framing,
+checksum and connection handling. Everything Sundance-specific is added on top in
+`sundanceRS485.py`: the RS485 channel-assignment handshake that lets a third device join the
+panel bus, the XOR fold and field map for the `0xC4` status and `0xCA` light frames, and
+control by emulated panel button presses (`0xCC`) because Balboa's settings messages are not
+accepted on this bus. `app.py` is new: pybalboa is a library, this is an MQTT service for
+Home Assistant. The decoding is documented in `DECODING.md` rather than in the code alone.
+
+This is Apache 2.0 code, and upstream's attribution below stays as long as `balboa.py` ships
+here.
 
 ### Credits
 
