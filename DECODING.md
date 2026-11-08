@@ -226,9 +226,10 @@ messaging" and return.
 
 ⚠️ **Consequence for every future setting:** the only way to change anything on this tub is to
 emulate panel button presses (`send_CCmessage`), which for anything beyond temperature and the
-pumps means **navigating the panel menus**. `BTN_MENU = 254` is defined in the code and **never
-sent**. It is the single gate in front of: clock, date, both filtration cycles, heat mode, filter
-/ UV / water-change intervals, temperature units, language, and panel lock.
+pumps means **navigating the panel menus**. `BTN_MENU = 254` is the single gate in front of:
+clock, date, both filtration cycles, heat mode, filter / UV / water-change intervals,
+temperature units, language, and panel lock. The bridge sends it only for the menu walks it
+drives (`pybalboa/panel_menu.py`). It has no code for a held Menu (209, §7).
 
 ⚠️ **Do not brute-force the button code space.** The observed codes cluster at 224–242 and 254;
 the gaps are tempting and this is a device with a 4 kW heater, pumps and an ozone/UV system on
@@ -492,6 +493,13 @@ crossing from HA until `pybalboa/panel_menu.py` is taught them. DST's 2 AM → 1
 **Set-point and pump presses are held while the panel shows a menu**: on a
 menu screen the temperature buttons edit the setting and Pump 1 accepts it.
 
+**Panel locks apply to the bridge's presses too, on the 680** (GalKar83's finding,
+[pete-jorgensen/SundanceHotTub2MQTT#10](https://github.com/pete-jorgensen/SundanceHotTub2MQTT/pull/10)).
+With Temperature Lock on, a set point sent from the bus was never accepted. With Access Lock on,
+the light did not change. ⚠️ **Not tested on the 780.** If the 780 does the same, a set point sent
+under a Temperature Lock will look like a command that never confirms. The bridge does not read,
+set or release the locks (§7, f1 b3 / f10 b4 / f14, and 0xCC 209).
+
 ---
 
 ## 5. Known defects in the code (independent of decoding)
@@ -658,9 +666,9 @@ Boards and sources:
 | **f2** b0–b2 | weekday, Sunday = 0 ✅ (424 frames, §6.3) | weekday, Sunday = 0 ✅ (22–25 Oct 2026, power-up date; Saturday 7 Nov = 6; with the date set to Wednesday 8 Jul 2026 = 3) | unknown |
 | **f2** b3 | unknown | Jet 1 low speed (pump side) ✅ | unknown |
 | **f2** b4 | pump 1 ✅ (per §2) | Jet 1 high speed ✅ | unknown |
-| **f2** b5 | a value is being **edited**, the set point included ✅ (18 of 18 rises came as `f13` entered an edit state, four captures) | a menu value is being **edited** ✅ (2026-10); set for about 8 s after each set point change (2026-11-08) | unknown |
+| **f2** b5 | a value is being **edited**, the set point included ✅ (18 of 18 rises came as `f13` entered an edit state, four captures); a set point change held it for 8 s (1 seen), as on the 680 | a menu value is being **edited** ✅ (2026-10); set for about 8 s after each set point change (2026-11-08) | unknown |
 | **f2** b6 | unknown | never set ❓ | unknown |
-| **f2** b7 | clear in all 415 saved frames, including 23 with the year at 2014 ❓ | set while **Water Refresh is Off**, and after a power loss until the clock is set ✅ | unknown |
+| **f2** b7 | clear in all 424 saved frames (85 from the 2023 correlation sessions, 339 from the three October 2026 captures), including 23 with the year at 2014 ❓ | set while **Water Refresh is Off**, and after a power loss until the clock is set ✅ | unknown |
 | **f3** | Filter Change days, `f3 ^ 250`; 250 = 0 ✅ (menu walk, §3.11) | Filter Change days, `f3 ^ 250`; raw 250 means Off **or** due ✅ | unknown |
 | **f4** | b6 = circulation pump running (either mode); rest constant `0b101` ✅ (per §3.1) | constant 6; no separate circulation pump on this model 🟡 | unknown |
 | **f5** | water temperature `^ 2`, °F ✅ (per §2) | water temperature `^ 2`; half °C in °C mode, whole °F in °F mode ✅ | `^ 2`, half °C (×2) ✅ ([pete-jorgensen/SundanceHotTub2MQTT#5](https://github.com/pete-jorgensen/SundanceHotTub2MQTT/issues/5)) |
@@ -677,8 +685,8 @@ Boards and sources:
 | **f13** | panel state XOR the UV (ClearRay) days ✅ (§3.12) | screen code XOR key; key = (ClearRay days & 0xFF) XOR 78, so the main screen reads as the low byte of the counter ✅ (set on the spa 2026-10-31; counter above 255 checked) | unknown |
 | **f14** | temperature-like value V, **XOR 32 while the circulation pump runs** ✅: with b5 undone, `(f5 ^ 2) − f14` is −1 to +3 in 424 of 424 frames (four captures, both circulation states); b5 flipped at the one circulation start captured and at neither pump 1 edge (0 of 2). b6 has been 1 in every frame (only °F seen); b7 a flag, n = 3, meaning unknown (§3.4) | slow value V (about −1 per hour idle, rises while the pump runs; meaning unknown ❓) XOR flags: b1 flips with the Settings Lock and b2 with the Service Lock (seen as a flip within 5 s of the panel event, 2026-10-25; the absolute lock state cannot be read from f14 alone because V is unknown), b5 flips while the pump runs, b6 = °F ✅; b7 never seen | unknown |
 | **f15** | the value of the menu field being edited; 0 otherwise ✅ (§3.11; the hour and minute are keyed by each other) | value shown on the current menu screen; encoding depends on the screen ✅. LANG edit screen, key 117 (2026-11-08): English reads 1 and the Warmer cycle goes 1 → 2 → 3 → 0, so the language code is shifted by an amount that depends on the daily key (rule not found yet) | unknown |
-| **frame** | `C4` payload 33 bytes, `CA` 29; the fold reads all but the last, and the last byte is the per-frame mask (the first payload byte XOR 38 in `C4`, XOR 102 in `CA`), no data seen in it ✅ (§3.8). In `CA`, mask ^ (`0x24` + position) leaves plaintext (622 of 622 frames); in `C4` not in that form ❓ | `C4` payload 33 bytes, `CA` 29, the last byte is the per-frame mask: the first payload byte XOR 38 in `C4` (43 of 43 frames), XOR 102 in `CA` (all frames), as on the 780 ✅ (live raw frames, 2026-11-08). `CA` at rest after XOR with the last byte is `66 DA 26 27 28 29 2A 4F 2C 2D 2E D0 30 … 3F`, the 780 pattern. In `C4` the fixed bytes agree with the 780's where both are constant (positions 0, 3, 4, 7, 9, 11, 12, 13, 17); the positions that moved in the set point, light, Jets 1 and heater tests were only f1 (2), f2 (5), f8 (16), f10 (21), f11 (22), f13 (26) and f15 (30, 31), so nothing hidden was seen in `C4` ✅ | payload four bytes longer (per [garbled1/pybalboa#122](https://github.com/garbled1/pybalboa/issues/122)) |
-| **0xCC** | code = `a ^ b`, **no `^ 1`** (the bridge sends `code, 0`): Up 225, Down 226, Pump 1 228, Pump 2 229, Circulation 239, light 241 / 242, Menu 254, all seen as panel presses ✅; 224 = nothing pressed. 228 started pump 1 (1 of 1), 229 pump 2 (2 of 2). In this form §5b's four frames are 229, 229, 228, 228 | code = `a ^ b`, no `^ 1` (the firmware log prints `a ^ b ^ 1`, one more than the code): idle 224; Warmer 225, Cooler 226, Jets 1 228, Jets 2 229, Circulation 239, light 241/242, Menu 254, Menu held 209 ✅. A single 209 sent from the ESP's own channel, with no 254 stream before it, releases Access, Temperature, Settings and Service Lock ✅ (2026-11-08); the controller also applies the locks to the ESP's own presses (Temperature Lock: the set point is never accepted; Access Lock: the light does not change) ✅ | unknown |
+| **frame** | `C4` payload 33 bytes, `CA` 29; the fold reads all but the last, and the last byte is the per-frame mask (the first payload byte XOR 38 in `C4`, XOR 102 in `CA`), no data seen in it ✅ (§3.8). In `CA`, mask ^ (`0x24` + position) leaves plaintext (622 of 622 frames); in `C4` not in that form ❓ | `C4` payload 33 bytes, `CA` 29, the last byte is the per-frame mask: the first payload byte XOR 38 in `C4` (43 of 43 frames), XOR 102 in `CA` (all frames), as on the 780 ✅ (live raw frames, 2026-11-08). `CA` at rest after XOR with the last byte is `66 DA 26 27 28 29 2A 4F 2C 2D 2E D0 30 … 3F`, the 780 pattern. In `C4` the fixed bytes agree with the 780's where both are constant (positions 0, 4, 7, 11, 12, 13, 17; also 3 and 9, which on the 780 are constant only while circulation is off: at the one circulation start rebuilt there, 3 carried f1 b7 and 9 carried f4 b6); the positions that moved in the set point, light, Jets 1 and heater tests were only f1 (2), f2 (5), f8 (16), f10 (21), f11 (22), f13 (26) and f15 (30, 31), so nothing hidden was seen in `C4` ✅ | payload four bytes longer (per [garbled1/pybalboa#122](https://github.com/garbled1/pybalboa/issues/122)) |
+| **0xCC** | code = `a ^ b`, **no `^ 1`** (the bridge sends `code, 0`): Up 225, Down 226, Pump 1 228, Pump 2 229, Circulation 239, light 241 / 242, Menu 254, all seen as panel presses ✅; 224 = nothing pressed. 228 started pump 1 (1 of 1), 229 pump 2 (2 of 2). In this form §5b's four frames are 229, 229, 228, 228 | code = `a ^ b`, no `^ 1` (the firmware log prints `a ^ b ^ 1`, the code with bit 0 flipped): idle 224; Warmer 225, Cooler 226, Jets 1 228, Jets 2 229, Circulation 239, light 241/242, Menu 254, Menu held 209 ✅. A single 209 sent from the ESP's own channel, with no 254 stream before it, releases Access, Temperature, Settings and Service Lock ✅ (2026-11-08); the controller also applies the locks to the ESP's own presses (Temperature Lock: the set point is never accepted; Access Lock: the light does not change) ✅ | unknown |
 | **0xCA** | same positions ✅ (§3.5, 621 frames, colours read at the panel): L1 brightness 100 / 66 / 33; L4 mode, 128 = colour fade, fixed colours 2 blue, 7 magenta, 6 red; L2 / L6 / L8 = B / G / R; L9 cycle time, 2 or 4 in fade, 0 on a fixed colour; L0 = 189, L3 = 60, L5 = 255 constant | same positions ✅ (30 Oct 2026 light-cycle test): L1 100 on / 0 off (no brightness steps), L4 mode, L2 = blue, L6 = green, L8 = red, 0–255 per mode (Blue 2: L2 255; Green 3: L6 255; Red 6: L8 255; Violet 7: L2 = L8 = 127); L9 blend speed (2 fast, 4 slow); L0 = 189, L3 = 100, L5 = 255 constant; L7 0 so far ❓ | unknown |
 
 Differences worth noting between models: f9 (the extra XOR on the 680), f4 (the circulation pump
