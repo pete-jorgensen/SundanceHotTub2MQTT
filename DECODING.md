@@ -271,6 +271,20 @@ in particular UV is not hiding there. Which other pattern bytes copy their field
 established; the bridge logs the pattern whenever it changes, and `RAW_FRAME_LOG` keeps the raw
 bytes.
 
+"Frame key" here means that per-frame byte (it changes every frame), not the daily display key
+of §3.12. The tail byte is the same mask seen from the other end: `last ^ first` is 38 in 255 of
+255 rebuilt `C4` frames and 102 in 622 of 622 `CA` frames (`python3 tools/nonce_check.py <logs>`).
+
+✅ **`CA`: the last byte is a per-frame mask over a +1 position counter** (GalKar83's hypothesis,
+[pete-jorgensen/SundanceHotTub2MQTT#9](https://github.com/pete-jorgensen/SundanceHotTub2MQTT/pull/9),
+confirmed on our 780 `CA` frames). XOR every payload byte `d[j]` with the last byte, then with `0x24 + j`, and
+the result `x[j]` is plaintext: in 622 of 622 saved `CA` frames, 13 of 14 pairs have one byte 0
+and the other byte equal to the folded light value (the mode in the first byte of its pair, the
+rest in the second). Pair 0 is `0x42, 0xFF` (fold 189). So in `CA` the fold loses nothing.
+❓ **`C4` does not fit that simple form.** Its bytes are stable relative to the mask, but no single
+base makes a +1 run: the best (`0x28`) leaves 1266 of 8160 bytes zero over 255 frames, and no
+frame has more than 8 of 32 positions on one run. What the fixed `C4` pattern is stays open.
+
 `xormsg` folds the payload in pairs: `c[i] = d[2i] ^ d[2i+1] ^ 1`. Three consequences:
 
 **(a) Half the message is discarded by construction.** 32 payload bytes become 16 values. As
@@ -663,7 +677,7 @@ Boards and sources:
 | **f13** | panel state XOR the UV (ClearRay) days ✅ (§3.12) | screen code XOR key; key = (ClearRay days & 0xFF) XOR 78, so the main screen reads as the low byte of the counter ✅ (set on the spa 2026-10-31; counter above 255 checked) | unknown |
 | **f14** | temperature-like value V, **XOR 32 while the circulation pump runs** ✅: with b5 undone, `(f5 ^ 2) − f14` is −1 to +3 in 424 of 424 frames (four captures, both circulation states); b5 flipped at the one circulation start captured and at neither pump 1 edge (0 of 2). b6 has been 1 in every frame (only °F seen); b7 a flag, n = 3, meaning unknown (§3.4) | slow value V (about −1 per hour idle, rises while the pump runs; meaning unknown ❓) XOR flags: b1 flips with the Settings Lock and b2 with the Service Lock (seen as a flip within 5 s of the panel event, 2026-10-25; the absolute lock state cannot be read from f14 alone because V is unknown), b5 flips while the pump runs, b6 = °F ✅; b7 never seen | unknown |
 | **f15** | the value of the menu field being edited; 0 otherwise ✅ (§3.11; the hour and minute are keyed by each other) | value shown on the current menu screen; encoding depends on the screen ✅ | unknown |
-| **frame** | 33-byte payload; the fold reads 32, and the 33rd byte is the frame key XOR 38, no data seen in it ✅ (§3.8) | whether a 33rd payload byte exists (the fold reads 32): not inspected ❓ | payload four bytes longer (per [garbled1/pybalboa#122](https://github.com/garbled1/pybalboa/issues/122)) |
+| **frame** | `C4` payload 33 bytes, `CA` 29; the fold reads all but the last, and the last byte is the per-frame mask (the first payload byte XOR 38 in `C4`, XOR 102 in `CA`), no data seen in it ✅ (§3.8). In `CA`, mask ^ (`0x24` + position) leaves plaintext (622 of 622 frames); in `C4` not in that form ❓ | whether a 33rd payload byte exists (the fold reads 32): not inspected ❓ | payload four bytes longer (per [garbled1/pybalboa#122](https://github.com/garbled1/pybalboa/issues/122)) |
 | **0xCC** | code = `a ^ b`, **no `^ 1`** (the bridge sends `code, 0`): Up 225, Down 226, Pump 1 228, Pump 2 229, Circulation 239, light 241 / 242, Menu 254, all seen as panel presses ✅; 224 = nothing pressed. 228 started pump 1 (1 of 1), 229 pump 2 (2 of 2). In this form §5b's four frames are 229, 229, 228, 228 | idle 224; Warmer 225, Cooler 226, Jets 1 228, Jets 2 229, Circulation 239, light 241/242, Menu 254, Menu held 209 ✅ | unknown |
 | **0xCA** | same positions ✅ (§3.5, 621 frames, colours read at the panel): L1 brightness 100 / 66 / 33; L4 mode, 128 = colour fade, fixed colours 2 blue, 7 magenta, 6 red; L2 / L6 / L8 = B / G / R; L9 cycle time, 2 or 4 in fade, 0 on a fixed colour; L0 = 189, L3 = 60, L5 = 255 constant | same positions ✅ (30 Oct 2026 light-cycle test): L1 100 on / 0 off (no brightness steps), L4 mode, L2 = blue, L6 = green, L8 = red, 0–255 per mode (Blue 2: L2 255; Green 3: L6 255; Red 6: L8 255; Violet 7: L2 = L8 = 127); L9 blend speed (2 fast, 4 slow); L0 = 189, L3 = 100, L5 = 255 constant; L7 0 so far ❓ | unknown |
 
