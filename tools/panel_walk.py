@@ -3,9 +3,8 @@
 
 Reads the bridge's own container log (the "Got Button Press" lines and the "Full Message: C4"
 lines) and prints one line per press and one per C4 frame, with only the fields that moved
-since the previous frame. ⚠️ The log only carries a C4 frame when an *unknown* field changed
-(DECODING.md §0), so a frame where only a known field moved is missing - read the press order
-from this, not frame counts.
+since the previous frame. The bridge logs a C4 frame whenever any field changes, so frame
+counts can be compared across a walk.
 
     docker logs hottub > walk.log 2>&1
     python3 tools/panel_walk.py walk.log

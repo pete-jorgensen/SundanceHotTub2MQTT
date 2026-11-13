@@ -34,14 +34,11 @@ STATUS_UPDATE = 0xC4
 LIGHTS_UPDATE = 0xCA
 CC_REQ = 0xCC
 
-# Jacuzzi support (message types 0x16 / 0x17 / 0x23) has been REMOVED.
-# Those frames were routed into the Sundance parsers, which apply the xormsg fold - but a
-# 0x16 payload is PLAINTEXT (12 zero bytes in 32, against none in a Sundance payload), so
-# folding it produced noise and silently mis-decoded every Jacuzzi tub. Rather than ship a
-# decoder that quietly returns nonsense for a whole model family, the claim is withdrawn.
-# The evidence, including the raw 0x16 frame, is in DECODING.md 3.9.
-# Anything not handled below now raises the "Unknown Message" warning, which is the honest
-# outcome: visible, rather than plausible and wrong.
+# Only Sundance frames are decoded. Jacuzzi tubs send a different, plaintext message family
+# (0x16 / 0x17 / 0x23): a 0x16 payload has 12 zero bytes in 32, against none in a Sundance
+# payload, so the xormsg fold would turn it into noise. This bridge rejects those types with
+# the "Unknown Message" warning, which is the honest outcome: visible, rather than plausible
+# and wrong. The evidence, including a raw 0x16 frame, is in DECODING.md 3.9.
 
 #Button CC equivs
 BTN_CLEAR_RAY = 239
@@ -65,6 +62,12 @@ TEMP2_VALUE_MASK = 0x7F #TEMP_FEILD_2 the temperature is the low 7 bits
 TEMP2_PLAUSIBLE_MIN = 40.0 #Below this the second sensor reading is treated as undecoded, not cold
 TEMP2_PLAUSIBLE_MAX = 115.0 #Above this likewise - see DECODING.md 3.4
 CHECKS_BEFORE_RETRY = 2 #How many status messages we should receive before retrying our command
+# Presses one target may cost before the bridge drops it. A set point can need one press per
+# degree plus retries; a toggle (pump, ClearRay) that has not answered after a few presses is
+# being refused, and pressing on only flips it back and forth.
+MAX_TEMP_PRESSES = 64
+MAX_TOGGLE_PRESSES = 10
+CIRC_PUMP = 2 #index in PUMP_BUTTONS / pump_status of the ClearRay (manual circulation) button
 RECONNECT_BACKOFF_START = 5 #s before the 2nd reconnect attempt; doubles per failure
 RECONNECT_BACKOFF_MAX = 60 #s cap, so an hour-long outage costs ~60 attempts, not ~3000
 FILTER_DAYS_KEY = 250 #UNKOWN_FIELD_3 = this XOR the FC days: 250 at FC 0, 238 / 228 / 210 at FC 20 / 30 / 40
@@ -224,7 +227,11 @@ class SundanceRS485(BalboaSpaWifi):
         self.UnknownField12  =  0
         
         self.attemptsToCommand = 0
-        
+        self.tempPresses = 0                       # presses spent on the current set-point target
+        self.pumpPresses = [0] * len(PUMP_BUTTONS) # presses spent on each pump target
+        self.circLocked = -1                       # 1 = auto-running: ClearRay cannot change it
+        self.commandStatus = "idle"                # the last refused or dropped command, for HA
+
         self.checkCounter = 0
         self.checkCounterL = 0
         self.CAprior_status = None
@@ -296,6 +303,7 @@ class SundanceRS485(BalboaSpaWifi):
             return
         self._drop_queued_presses(*TEMP_BUTTONS)
         self.attemptsToCommand = 0
+        self.tempPresses = 0
         self.targetTemp = newtemp
 
     async def change_light(self, light, newstate):
@@ -316,7 +324,19 @@ class SundanceRS485(BalboaSpaWifi):
         # is already met without pressing anything.
         self._drop_queued_presses(PUMP_BUTTONS[pump])
         self.attemptsToCommand = 0
+        self.pumpPresses[pump] = 0
+        if pump == CIRC_PUMP and self.circMode == "auto" and newstate != self.pump_status[pump]:
+            # Auto-running (heat, a filter cycle or the jets): the spa ignores ClearRay until
+            # it ends (DECODING.md 3.1). Press nothing; the switch keeps its real state.
+            self.target_pump_status[pump] = NO_CHANGE_REQUESTED
+            self._refuse("circulation is running automatically (heating, filtering or jets); "
+                         "it can be changed only when it is off or manual")
+            return
         self.target_pump_status[pump] = newstate
+
+    def _refuse(self, why):
+        self.commandStatus = "refused: " + why
+        self.log.warning("Command refused: %s", why)
 
     def _drop_queued_presses(self, *buttons):
         """Forget presses for these buttons that are queued but not yet sent.
@@ -343,9 +363,6 @@ class SundanceRS485(BalboaSpaWifi):
         if self.channel is None:
             self.log.info("Tried to send CC message without having been assigned a channel")
             return
-            
-        if self.attemptsToCommand > 64:
-            self.log.info("Tried {} times to change state {} giving up.".format( self.attemptsToCommand, val))
             
         # Exampl: 7E 07 10 BF CC 65 85 A6 7E 
         message_length = 7
@@ -430,7 +447,7 @@ class SundanceRS485(BalboaSpaWifi):
         HEAT_MODE_FIELD = 6 #
         DATE_FIELD_2 = 7 #(day << 3) XOR month, see date_candidates
         SET_TEMP_FIELD = 8 #Devide by 2 if in C, otherwise F
-        UNKOWN_FIELD_9 = 9 #YEAR - 2000 (was guessed to be a service counter; it is the year)
+        UNKOWN_FIELD_9 = 9 #YEAR - 2000
         HEATER_FIELD_1 = 10 #= 64 when Heat on
         MINUTE_FIELD = 11 #Ok as is
         UNKOWN_FIELD_12 = 12 #H2O days, plain (two readings, DECODING.md 3.11)
@@ -470,9 +487,11 @@ class SundanceRS485(BalboaSpaWifi):
         manualCirc = (data[PUMP_FIELD_1] >> MANUAL_CIRC_SHIFT) & 1
         circB5 = (data[PUMP_FIELD_1] >> CIRC_B5_SHIFT) & 1
         circB6 = (data[PUMP_FIELD_1] >> CIRC_B6_SHIFT) & 1
+        # Three states (DECODING.md 3.1): off, manual (ClearRay), and auto -
+        # running for heat, a filter cycle or the jets, which ClearRay cannot change.
         if manualCirc:
             circMode = "manual"
-        elif autoCirc:
+        elif autoCirc or circ_pump_status:
             circMode = "auto"
         else:
             circMode = "off"
@@ -563,6 +582,7 @@ class SundanceRS485(BalboaSpaWifi):
         self.autoCirc = autoCirc
         self.manualCirc = manualCirc
         self.circMode = circMode
+        self.circLocked = 1 if circMode == "auto" else 0
         self.circB5 = circB5
         self.circB6 = circB6
         self.panelState = panelState
@@ -632,21 +652,39 @@ class SundanceRS485(BalboaSpaWifi):
 
         if (self.checkCounter == 0):
             if(self.settemp  != self.targetTemp and self.targetTemp != NO_CHANGE_REQUESTED):
-                if self.targetTemp < self.settemp:
-                    await self.send_CCmessage(BTN_TEMP_DOWN)
+                if self.tempPresses >= MAX_TEMP_PRESSES:
+                    self.targetTemp = NO_CHANGE_REQUESTED
+                    self._refuse("set point did not reach its target after %d presses; stopped"
+                                 % MAX_TEMP_PRESSES)
                 else:
-                    await self.send_CCmessage(BTN_TEMP_UP)
-                self.checkCounter = CHECKS_BEFORE_RETRY
+                    if self.targetTemp < self.settemp:
+                        await self.send_CCmessage(BTN_TEMP_DOWN)
+                    else:
+                        await self.send_CCmessage(BTN_TEMP_UP)
+                    self.tempPresses += 1
+                    self.checkCounter = CHECKS_BEFORE_RETRY
             elif self.settemp  == self.targetTemp:
                 self.targetTemp = NO_CHANGE_REQUESTED
 
         if (self.checkCounter == 0):
             for i in range(0,len(self.target_pump_status)):
-                if self.pump_status[i] != self.target_pump_status[i] and self.target_pump_status[i] != NO_CHANGE_REQUESTED:
-                    await self.send_CCmessage(PUMP_BUTTONS[i]) #Pump 1, Pump 2, Clear Ray / Circulating Pump
-                    self.checkCounter = CHECKS_BEFORE_RETRY
-                elif self.pump_status[i] == self.target_pump_status[i]:
+                target = self.target_pump_status[i]
+                if target == NO_CHANGE_REQUESTED:
+                    continue
+                if self.pump_status[i] == target:
                     self.target_pump_status[i] = NO_CHANGE_REQUESTED
+                elif i == CIRC_PUMP and self.circMode == "auto":
+                    # Heat or the jets took over circulation while the request was pending.
+                    self.target_pump_status[i] = NO_CHANGE_REQUESTED
+                    self._refuse("circulation went to automatic before the change was made")
+                elif self.pumpPresses[i] >= MAX_TOGGLE_PRESSES:
+                    self.target_pump_status[i] = NO_CHANGE_REQUESTED
+                    self._refuse("%s did not answer %d presses; stopped"
+                                 % (("Pump 1", "Pump 2", "Circulation")[i], MAX_TOGGLE_PRESSES))
+                else:
+                    await self.send_CCmessage(PUMP_BUTTONS[i]) #Pump 1, Pump 2, Clear Ray / Circulating Pump
+                    self.pumpPresses[i] += 1
+                    self.checkCounter = CHECKS_BEFORE_RETRY
 
     async def _step_menu(self, screen, edit, raw_screen):
         """Run the head of the menu-job queue on this frame. True while a job owns the buttons."""
@@ -724,6 +762,15 @@ class SundanceRS485(BalboaSpaWifi):
         """FC / UV / H2O days through their menus. ValueError if out of range."""
         self._queue_menu_job(panel_menu.service_job(name, days, self.uvDays))
 
+    async def set_heat_mode(self, mode):
+        """AUTO / ECO / DAY. Presses nothing: the HEAT edit has not been recorded (panel_menu).
+
+        Already in that mode: says so in menuStatus. Any change: panel_menu.NotObserved, with
+        the missing capture named. ValueError for an unknown mode or an unread f6."""
+        if panel_menu.heat_mode_job(mode, self.heatMode) is None:
+            self.menuStatus = "done: heat mode is already %s; nothing pressed" % self.heatModeText
+            self.log.info("Panel menu: %s", self.menuStatus)
+
     async def parse_CA_light_status_update(self, data):
         """Parse a status update from the spa.
         01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29
@@ -738,8 +785,9 @@ class SundanceRS485(BalboaSpaWifi):
         01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29
         TODO Example after decryption
         """
-        #TODO: The rest... - the layout below is by byte position with no recorded correlation
-        # (DECODING.md 3.5); every byte is kept in lightFields and logged on change.
+        # The byte map below is confirmed by a saved capture: see DECODING.md 3.5.
+        # Bytes 0, 3 and 5 are constant and still unknown. Every byte is kept in
+        # lightFields and logged on change.
 
         self.lightBrightnes = data[1]
         self.lightMode = data[4]

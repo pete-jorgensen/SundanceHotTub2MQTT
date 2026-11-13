@@ -98,7 +98,7 @@ def main(paths):
             key = (bit(f[4], 6), bit(f[14], 5))
             both[key] = both.get(key, 0) + 1
         print("frames by (circ, f14.b5):", dict(sorted(both.items())))
-        # Gal's reading: f14 = V XOR (32 while the pump runs). Undo it and compare with f5.
+        # GalKar83's reading: f14 = V XOR (32 while the pump runs). Undo it and compare with f5.
         plain, undone = {}, {}
         for _, f in frames:
             t1 = f[5] ^ 2

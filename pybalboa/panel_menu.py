@@ -74,14 +74,19 @@ START_FRAMES = 200   # how long a queued job waits for an idle panel before givi
 # current minute: 7, 4, 1 at 7 PM at minutes 0, 3, 6; 14 = 8 ^ 6 one step up; and the walk's
 # 10, 11, 8 = 4, 5, 6 PM at minute 14. In the minute field f15 = minute XOR the hour: the walk's
 # 23 steps decode with the 6 PM being set, and a TIME edit opened at 7:03 shows 4 = 3 ^ 7. DECODING.md 3.11.
+# 12 o'clock is 0 in both keys (hour field 25 = 0 ^ 25 at minute 25; minute field 25 = 25 ^ 0 with
+# 12 set), so the hour value runs 0..11 and steps cyclically 11 -> 0 -> 1. The minute in the hour key is
+# the one held when the edit OPENED (MenuJob holds it), not the live f11, which can tick mid-edit.
 def hour12_value(raw, ctx):
     v = raw ^ ctx["minute"]
-    return v if 1 <= v <= 12 else None
+    return v if 0 <= v <= 11 else None
 
 
 def minute_value_for(h12):
+    key = h12 % 12      # 12 o'clock keys the minute as 0
+
     def minute_value(raw, ctx):
-        v = raw ^ h12
+        v = raw ^ key
         return v if v <= 59 else None
     return minute_value
 
@@ -116,11 +121,15 @@ class Adjust:
     edit opens - the value the spa already reports, or up to OPEN_SLACK more (the press that
     opened the edit has been seen to step it too). A hypothesis that does not is dropped before
     any press, so two that would step in opposite directions never both drive.
+
+    `cyclic`: the value wraps (the hour, 11 -> 0 -> 1), so it is only ever stepped UP, and a press
+    counts as moved when the value rose by one modulo the period.
     """
-    def __init__(self, screen, readings, label, opening=None, period=None, grid=False):
+    def __init__(self, screen, readings, label, opening=None, period=None, grid=False, cyclic=False):
         self.screen, self.readings, self.label = screen, list(readings), label
         self.opening, self.period = opening, period
         self.grid = grid
+        self.cyclic = cyclic
         self.opened = False
         self.settle = None      # grid: the value to step back to after passing the target
 
@@ -145,6 +154,7 @@ class MenuJob:
         self._sent_dir = None       # grid: direction of the last adjust press
         self._prev_value = None
         self.landed = None          # grid: the value a field settled on, if not the target
+        self._hold_minute = None    # the minute held in the TIME hour edit (its f15 key)
 
     @property
     def finished(self):
@@ -160,7 +170,14 @@ class MenuJob:
         `ctx` carries the frame's other decoded fields a value decode needs ({"minute": f11}).
         """
         now = time.monotonic() if now is None else now
-        self._ctx = ctx or {}
+        ctx = dict(ctx or {})
+        if screen in (OPENED["TIME"], TIME_EDIT[0]) and "minute" in ctx:
+            # The hour field is keyed by the minute the edit holds, which is the live minute
+            # when the edit opened - not f11, which keeps ticking (DECODING.md 3.11).
+            if self._hold_minute is None:
+                self._hold_minute = ctx["minute"]
+            ctx["minute"] = self._hold_minute
+        self._ctx = ctx
         if self.finished:
             return None
         if self._sent is not None:
@@ -198,6 +215,8 @@ class MenuJob:
                     a, b = dec(was_edit, c), dec(edit, c)
                     if a is None or b is None:
                         return False
+                    if step.cyclic:
+                        return (b - a) % step.period[0] == d % step.period[0]
                     return (b - a) * d > 0 if step.grid else b == a + d
                 step.readings = [(dec, t) for dec, t in step.readings if moved(dec)]
                 if not step.readings:
@@ -255,6 +274,11 @@ class MenuJob:
                 return None
             return self._act(screen, edit, now)
         v, t = live[0]
+        if step.cyclic:     # forward only: 11 -> 0 -> 1 is the wrap that has been seen
+            self._adjusts += 1
+            if self._adjusts > MAX_ADJUST:
+                return self.fail("too many presses setting the %s" % step.label)
+            return self._press(BTN_UP, screen, edit, now)
         self._adjusts += 1
         if self._adjusts > MAX_ADJUST:
             return self.fail("too many presses setting the %s" % step.label)
@@ -305,37 +329,31 @@ def time_job(hour, minute, now_hour):
     """`now_hour` is the spa's own hour (f0, a confirmed decode) when the job is queued."""
     if not (0 <= hour <= 23 and 0 <= minute <= 59):
         raise ValueError("%r:%r is not a time" % (hour, minute))
-    h12 = hour % 12 or 12
-    now12 = now_hour % 12 or 12
+    h12 = hour % 12         # 12 o'clock is 0 in the hour field and keys the minute as 0
+    now12 = now_hour % 12
+    pm = 1 if hour >= 12 else 0
     steps = _to("TIME") + [
         Press(BTN_UP, OPENED["TIME"]),
         Press(BTN_UP, TIME_EDIT[0]),     # steps the hour once, and marks it changed
         # The hour opens one step past the spa's own (the UP that marked it changed), up to
         # OPEN_SLACK more if a press was doubled; (v - want) % 12 counts steps forward.
-        Adjust(TIME_EDIT[0], [(hour12_value, h12)], "hour", opening=[now12], period=[12]),
+        Adjust(TIME_EDIT[0], [(hour12_value, h12)], "hour", opening=[now12], period=[12],
+               cyclic=True),
         Press(BTN_SELECT, TIME_EDIT[1]),
         Adjust(TIME_EDIT[1], [(minute_value_for(h12), minute)], "minute"),
         Press(BTN_SELECT, TIME_EDIT[2]),
+        Adjust(TIME_EDIT[2], [(plain, pm)], "AM/PM"),    # 1 = PM, 0 = AM; the hour wrap leaves it alone
         Press(BTN_SELECT, SCREEN["TIME"]),
     ]
 
-    def precheck(spa):
-        # The AM/PM field has one reading (1 = PM) and where the hour wraps (11 -> 12 -> 1, and
-        # does AM/PM flip with it?) is unseen, so stay inside 1..11 of one half of the day -
-        # counting the step the opening UP makes, so 11 o'clock is out as a start too.
-        cur = spa.time_hour
-        if cur // 12 != hour // 12 or not 1 <= cur % 12 <= 10 or not 1 <= hour % 12 <= 11:
-            return ("moving the hour from %02d to %02d would cross noon/midnight or pass "
-                    "12 o'clock, and the AM/PM field is not decoded yet" % (cur, hour))
-        return None
-
     def check(spa):
         got = (spa.time_hour, spa.time_minute)
-        # Allow the minute to have ticked over while the presses went out.
-        if got[0] == hour and (got[1] - minute) % 60 in (0, 1):
+        # Allow the clock to have ticked one minute (over an hour, noon or midnight too)
+        # while the presses went out.
+        if ((got[0] * 60 + got[1]) - (hour * 60 + minute)) % 1440 in (0, 1):
             return None
         return "the spa now reads %02d:%02d" % got
-    return MenuJob("time %02d:%02d" % (hour, minute), steps, check=check, precheck=precheck)
+    return MenuJob("time %02d:%02d" % (hour, minute), steps, check=check)
 
 
 def service_job(name, days, uv_now):
@@ -362,3 +380,35 @@ def service_job(name, days, uv_now):
         return None if got == want else "the spa now reads %s %s" % (name, got)
     job.check = check
     return job
+
+
+# Heat mode: f6 reads 32 AUTO / 34 ECO / 36 DAY (HEAT_MODE_MAP in sundanceRS485). The HEAT screen
+# (state 14) is reached by three MENU presses and was seen showing AUTO - but no HEAT edit has
+# ever been recorded: no capture holds state 15 or 16, f6 is 32 in every saved frame, and
+# nothing says which button changes the mode, in what order the modes step, or how it saves
+# (DECODING.md 3.11). So the driver changes nothing here; it only reports that the spa is
+# already in the asked mode. The ECO / DAY codes come from the correlation sessions, with no
+# record of the presses that made them.
+HEAT_MODES = {"AUTO": 32, "ECO": 34, "DAY": 36}
+HEAT_EDIT_MISSING = (
+    "changing the heat mode is not driven: the HEAT edit has never been recorded at the panel "
+    "(which button changes it, the order AUTO/ECO/DAY step in, and how it saves). "
+    "Needed: a bridge log of a person changing HEAT AUTO -> ECO -> DAY -> AUTO at the panel")
+
+
+class NotObserved(ValueError):
+    """A setting whose panel edit has not been recorded, so the bridge will not press for it."""
+
+
+def heat_mode_job(mode, current):
+    """None if the spa already reads `mode` (`current` is f6); NotObserved for any change.
+
+    ValueError for a mode the spa does not have, or while f6 has not been read."""
+    mode = str(mode).strip().upper()
+    if mode not in HEAT_MODES:
+        raise ValueError("heat mode must be one of %s" % ", ".join(HEAT_MODES))
+    if current not in HEAT_MODES.values():
+        raise ValueError("the spa has not reported a known heat mode yet (f6 = %r)" % (current,))
+    if HEAT_MODES[mode] == current:
+        return None
+    raise NotObserved(HEAT_EDIT_MISSING)

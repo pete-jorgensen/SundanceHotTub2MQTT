@@ -36,10 +36,15 @@ def new_spa():
     return spa
 
 
-def feed(spa, settemp, pump1_on=0):
+# Circulation fields f1, f4, f10 from the DECODING.md 3.1 truth table.
+CIRC = {"off": (0, 5, 0), "auto": (96, 69, 128), "manual": (224, 69, 0)}
+
+
+def feed(spa, settemp, pump1_on=0, circ="off"):
     fields = list(BASE)
     fields[8] = settemp
     fields[2] = 1 << 4 if pump1_on else 0
+    fields[1], fields[4], fields[10] = CIRC[circ]
     asyncio.run(spa.parse_C4status_update(frame(fields)))
 
 
@@ -93,6 +98,69 @@ run(spa.send_CCmessage(S.BTN_P1))
 run(spa.change_pump(0, 0))
 check("retargeting a pump leaves a queued temperature press alone",
       queued(spa) == [S.BTN_TEMP_UP], queued(spa))
+
+# 4. circulation's three states (DECODING.md 3.1): off -> manual, manual -> off, auto locked
+C = S.CIRC_PUMP
+spa = new_spa()
+feed(spa, 102, circ="auto")
+check("auto-running reads as mode auto, locked", (spa.circMode, spa.circLocked) == ("auto", 1),
+      (spa.circMode, spa.circLocked))
+run(spa.change_pump(C, 1))
+for _ in range(6):
+    feed(spa, 102, circ="auto")
+check("ON while auto-running presses nothing", S.BTN_CLEAR_RAY not in queued(spa), queued(spa))
+check("... leaves no target pending", spa.target_pump_status[C] == S.NO_CHANGE_REQUESTED,
+      spa.target_pump_status[C])
+check("... and says why", spa.commandStatus.startswith("refused:"), spa.commandStatus)
+
+spa = new_spa()
+feed(spa, 102, circ="off")
+check("off reads as mode off, unlocked", (spa.circMode, spa.circLocked) == ("off", 0),
+      (spa.circMode, spa.circLocked))
+run(spa.change_pump(C, 1))
+feed(spa, 102, circ="off")
+check("ON while off presses ClearRay", queued(spa) == [S.BTN_CLEAR_RAY], queued(spa))
+spa.queue.queue.clear()
+for _ in range(4):
+    feed(spa, 102, circ="manual")
+check("... and stops once manual circulation shows",
+      spa.target_pump_status[C] == S.NO_CHANGE_REQUESTED and not queued(spa),
+      (spa.target_pump_status[C], queued(spa)))
+
+spa = new_spa()
+feed(spa, 102, circ="manual")
+run(spa.change_pump(C, 0))
+feed(spa, 102, circ="manual")
+check("OFF while manual presses ClearRay", queued(spa) == [S.BTN_CLEAR_RAY], queued(spa))
+
+spa = new_spa()
+feed(spa, 102, circ="off")
+run(spa.change_pump(C, 1))
+feed(spa, 102, circ="auto")
+check("a pending ON is dropped when heat takes circulation over",
+      spa.target_pump_status[C] == S.NO_CHANGE_REQUESTED and not queued(spa),
+      (spa.target_pump_status[C], queued(spa)))
+
+# 5. a spa that never answers: the press stops at the cap, and the target is dropped
+spa = new_spa()
+feed(spa, 96, circ="off")
+run(spa.change_pump(0, 1))
+for _ in range(200):
+    feed(spa, 96, pump1_on=0, circ="off")
+presses = [b for b in queued(spa) if b == S.BTN_P1]
+check("an unanswered pump stops at MAX_TOGGLE_PRESSES", len(presses) == S.MAX_TOGGLE_PRESSES,
+      len(presses))
+check("... and its target is dropped", spa.target_pump_status[0] == S.NO_CHANGE_REQUESTED,
+      spa.target_pump_status[0])
+
+spa = new_spa()
+feed(spa, 96)
+run(spa.send_temp_change(104))
+for _ in range(400):
+    feed(spa, 96)
+ups = [b for b in queued(spa) if b == S.BTN_TEMP_UP]
+check("an unanswered set point stops at MAX_TEMP_PRESSES", len(ups) == S.MAX_TEMP_PRESSES, len(ups))
+check("... and its target is dropped", spa.targetTemp == S.NO_CHANGE_REQUESTED, spa.targetTemp)
 
 if __name__ == "__main__":
     ok = all(results)

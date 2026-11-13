@@ -3,9 +3,8 @@
 The record of **what this project has decoded of the Sundance RS485 protocol**, how confident
 each field is, and what is still unknown.
 
-*Plan vs as-built:* §1–§5 are **as-built** (what the code does and what the wire shows).
-§6 is **open questions** — hypotheses, not facts. Anything moved from §6 to §1–§5 must arrive
-with the evidence that moved it.
+§1–§5 say what the code does and what the wire shows. §6 is **open questions**: hypotheses,
+not facts.
 
 ---
 
@@ -43,7 +42,7 @@ Frames are `0x7E`-delimited with a Balboa checksum. Status payloads are XOR-fold
 | `0xC4` | `STATUS_UPDATE` | yes | Main status. |
 | `0xCA` | `LIGHTS_UPDATE` | partial | Light state. Field layout is largely guessed — see §3.5. |
 | `0xCC` | `CC_REQ` | yes (send + observe) | Button press. How commands are issued. |
-| `0x16` / `0x17` / `0x23` | — | **not handled** | Jacuzzi variants. Support was withdrawn — see §3.9. They raise the "Unknown Message" warning. |
+| `0x16` / `0x17` / `0x23` | — | **not handled** | Jacuzzi's plaintext message family. Not decoded — see §3.9. They raise the "Unknown Message" warning. |
 | `0x00`–`0x07` | channel handshake | yes | Clear-to-send, channel assignment, existing-client probe. |
 
 ✅ **The message-type space is closed for this tub.** `listen()` warns on any type `> 0x07` it
@@ -66,7 +65,7 @@ does not recognise; **zero** such warnings in 48 h. Every frame this spa emits i
 | 6 | `HEAT_MODE_FIELD` | 32 AUTO / 34 ECO / 36 DAY | **high** (map from the correlation sessions) | **32**, constant | ✅ |
 | 7 | `DATE_FIELD_2` | **`(day << 3) XOR month`** | **high** — §3.3 | `137, 145, 153` (Jan 17→19); 28 (Apr 3) → **194** (Oct 25) | ✅ |
 | 8 | `SET_TEMP_FIELD` | Set point, °F | **high** | 96, 98 | ✅ |
-| 9 | `UNKOWN_FIELD_9` | **year − 2000** | **high** — §3.3 | 14 (2014) → 25 → **26** as the year was stepped; 23 in the correlation sessions (taken in 2023) | ✅ (in the date) |
+| 9 | `UNKOWN_FIELD_9` | **year − 2000** | **high** — §3.3 | 14 (2014) → 25 → **26** as the year was stepped; 23 in the earlier correlation sessions | ✅ (in the date) |
 | 10 | `HEATER_FIELD_1` | b6 = heater on; **b7 = AUTOMATIC circulation** | **high** — §3.1 | `0, 128, 192` | ✅ |
 | 11 | `MINUTE_FIELD` | Minute, plain | **high** | 0–59 | ✅ |
 | 12 | `UNKOWN_FIELD_12` | **H2O days**, plain | low — two readings, §3.11 | 0 for 35 days → **30** after the H2O screen was visited | ✅ `number` |
@@ -110,6 +109,27 @@ No exceptions. The truth table over the whole log:
 `f1.b6` is not the auto-circulation flag, though it agrees with it in steady circulation; that
 is `f10.b7`.
 
+**When the ClearRay button works** (observed at the spa's own panel):
+
+- When the circulation pump runs because the spa is heating or the jets are on, the button
+  does nothing.
+- When nothing runs, a press starts the pump for a preset time. A second press stops it.
+- When a new set point causes heating, the pump runs until heating completes. The user
+  cannot stop it.
+
+So circulation has three states, and the bridge applies the rule to them:
+
+| state | bits | the manual switch |
+| --- | --- | --- |
+| off | `f4.b6` = 0 | ON presses ClearRay once: a manual run starts |
+| manual | `f1.b7` = 1 | OFF presses ClearRay once: the run stops |
+| auto (heat, filter cycle, jets) | `f4.b6` or `f10.b7` = 1, `f1.b7` = 0 | locked: the bridge presses nothing and says why in Last Command |
+
+The lock matters because the spa ignores a ClearRay press during an automatic run. A bridge that
+keeps pressing an unanswered toggle only flips it back and forth. A ClearRay press from Home
+Assistant while the spa is fully idle is not yet confirmed on a live spa; that press would also
+be the first confirmation that 0xEF is the ClearRay code (§6.6).
+
 ❓ **`f1.b5` vs `f1.b6` remain unnamed.** Both are 1 in steady circulation; they separate only
 across transitions (the singleton `f1` values 32, 64 and 160). Exposed as diagnostics rather
 than guessed at.
@@ -139,6 +159,13 @@ That is the home screen showing UV 132 → 130. The old map is right under a key
 every screen read at its mapped code XOR 28 (§3.11), and 28 is the UV days at the two
 observations XORed together (36 ^ 56, §3.12).
 
+**The low 3 bits of the display field over weeks.** On an idle panel they count down about one
+per day, wrap from 0 to 7 on an 8-day cycle, and within one day dither between two adjacent
+values. They are the low 3 bits of the UV countdown (§3.12), and a 3-bit field wraps every 8
+counts by construction, so the wrap is a property of the mask, not of the spa. This reading is
+not certain, because the full UV days (up to 255) were not recorded alongside. What the full
+countdown does at 0 stays open (§6.1b).
+
 ### 3.3 Date: `(day << 3) XOR month`, and the year is `f9` ✅
 
 **Setting the date on the panel decoded it** (§3.11). The tub read Apr 3 2014 (the month and
@@ -159,7 +186,7 @@ nearest today — right for a tub whose date is kept set, wrong for one stuck in
 
 **`f9` is the year − 2000**, not a service counter: 14 for the whole three-day log (the tub's
 date was unset and read 2014), 25 when a date edit timed out with the year already stepped,
-26 once saved — and **23 in the correlation sessions**, which were taken in 2023.
+26 once saved — and **23 in the earlier correlation sessions**, whose spa date read 2023.
 
 The date fields report what the tub believes, not the real date: a tub whose date has not
 been set can read a 2014 date, and its weekday field follows that date (§6.3).
@@ -189,7 +216,8 @@ difference would be physically absurd in a hot tub, and 402 of 420 frames landin
 adjacent integers is far too tight for an analogue sensor. Undoing the flip brings
 `(f5 ^ 2) − f14` to −1…+3 in 424 of 424 saved frames, in both circulation states, and it flipped
 at the one captured circulation start (98 → 66) but at neither pump 1 edge. The correlation
-sessions read −31…−33 rather than +31…+33 because V's own bit 5 was clear then. See §7.
+sessions read −31…−33 rather than +31…+33 because bit 5 of the underlying value V (`f14` with
+the pump flip undone) was clear then. See §7.
 
 The correction must use the *current* frame's circulation state; using the previous frame's puts
 `temp2` 32 °F out across every circulation transition. Covered by `tools/test_decode.py`.
@@ -208,7 +236,7 @@ byte the map names behaves as named:
 | `data[9]` | cycle time | 2 then 4 in fade, 0 on a fixed colour |
 | `data[0]` / `data[3]` / `data[5]` | unknown | constant 189 / 60 / 255 across all 621 frames |
 
-Still true: `lightCycleTime` and `lightUnknown9` are **the same byte** (`data[9]`) — one should go.
+`data[9]` is the cycle time, held in `lightCycleTime`.
 
 Note the parser logs only on change, so the absence of `CA` lines in 48 h means the light state
 was static, **not** that the frames are absent.
@@ -217,7 +245,8 @@ was static, **not** that the frames are absent.
 
 ✅ **The menus have been walked (§3.11)**, and the bridge sets the clock and the
 date through them (`pybalboa/panel_menu.py`). The rule below still stands for everything not
-observed: FC / UV / H2O / PF / SF / HEAT / TEMP / LANG / LOCK edits are **not** driven.
+observed: PF / SF / HEAT / TEMP / LANG / LOCK edits are **not** driven (FC / UV / H2O are,
+§3.12; why HEAT is not: §3.11 *Heat mode*).
 
 `BalboaSpaWifi` implements `set_time`, `change_heatmode`, `change_temperature_unit`,
 `change_blower`, `change_aux`, `change_mister` and filter-cycle parsing. **All of them are
@@ -278,7 +307,7 @@ of §3.12. The tail byte is the same mask seen from the other end: `last ^ first
 
 ✅ **`CA`: the last byte is a per-frame mask over a +1 position counter** (GalKar83's hypothesis,
 [pete-jorgensen/SundanceHotTub2MQTT#9](https://github.com/pete-jorgensen/SundanceHotTub2MQTT/pull/9),
-confirmed on our 780 `CA` frames). XOR every payload byte `d[j]` with the last byte, then with `0x24 + j`, and
+confirmed on the 780's `CA` frames). XOR every payload byte `d[j]` with the last byte, then with `0x24 + j`, and
 the result `x[j]` is plaintext: in 622 of 622 saved `CA` frames, 13 of 14 pairs have one byte 0
 and the other byte equal to the folded light value (the mode in the first byte of its pair, the
 rest in the second). Pair 0 is `0x42, 0xFF` (fold 189). So in `CA` the fold loses nothing.
@@ -307,11 +336,11 @@ against the container's own UTC clock over 1427 frames gives a **single fixed wh
 (74 % / 22 % / 4 % across three adjacent minute values, which is just the two clocks ticking
 independently). So the hour key is a fixed constant, not flag bits.
 
-### 3.9 Jacuzzi support was removed — it was silently mis-decoding ✅
+### 3.9 Only Sundance frames are decoded; Jacuzzi frames are plaintext ✅
 
-Routing `0x16` to `parse_C4status_update` and `0x23` to the light parser, as the Jacuzzi support
-did, applies the `xormsg` fold to them. Comparing the payloads, using the `0x16` test vector that was
-commented out in `listen()`:
+Jacuzzi tubs send a different, plaintext message family (`0x16` / `0x17` / `0x23`). Routing
+`0x16` to `parse_C4status_update` and `0x23` to the light parser would apply the `xormsg` fold
+to them. Comparing the payloads, using a Jacuzzi `0x16` test vector:
 
 | | payload | zero bytes | byte range |
 | --- | --- | --- | --- |
@@ -327,11 +356,11 @@ The `0x16` payload:
 
 Runs of `00`, an `FF`, an `01`. **That is plaintext.** An XOR-obfuscated payload does not contain
 twelve zero bytes, and the Sundance one contains none and spans a narrow high range. Folding a
-plaintext frame produces noise — so every Jacuzzi tub running this bridge was getting confident,
-wrong readings.
+plaintext frame produces noise: the XOR decoder would give a Jacuzzi tub confident, wrong
+readings.
 
-✅ **Removed rather than fixed**: there is no Jacuzzi here to test against, and an untestable
-parser for a protocol with one sample frame would be the same mistake again. `0x16` / `0x17` /
+✅ **So the bridge rejects them**: there is no Jacuzzi here to test against, and an untestable
+parser for a protocol with one sample frame would give the same wrong readings. `0x16` / `0x17` /
 `0x23` fall through to the "Unknown Message" warning, which is the honest outcome — visible,
 rather than plausible and wrong. The frame above is kept here so anyone who wants to write a
 real Jacuzzi parser has the evidence.
@@ -361,8 +390,8 @@ A person worked the panel while the bridge logged, naming each screen and value;
 carries each press (the bridge logs other panels' `0xCC` presses) and each frame.
 `python3 tools/panel_walk.py <log>` turns such a log into a press/frame timeline.
 
-**Buttons, all observed on this tub:** MENU = **254**; temperature UP / DOWN = 225 / 226; **Pump 1 = 228 is the menu's accept key**. So the
-§5b frames "228 → 229" / "229 → 228" were Pump 1 / Pump 2 presses.
+**Buttons, all observed on this tub:** MENU = **254**; temperature UP / DOWN = 225 / 226; **Pump 1 = 228 is the menu's accept key**. The four
+§5b frames are Pump 1 and Pump 2 presses (§5b says which is which).
 
 **Screens.** MENU from the temperature screen steps through eleven screens and wraps back:
 
@@ -378,6 +407,22 @@ alert, per power cycle — is unknown, so the driver checks every screen it reac
 table and stops on any other code. 57 appears while the set point flashes.
 
 **Values read off the screens:** PF 8 am / 8 h, SF HOL, HEAT AUTO, **FC 20, UV 56, H2O 30**.
+
+**Heat mode — the screen is known, the edit is not.** Three MENU presses
+reach the HEAT screen (state 14), and it showed AUTO. That is all the captures hold:
+
+- No saved log has a HEAT edit state (15 or 16).
+- f6 is **32 AUTO in every saved frame** (339 status lines across the three captures). The
+  34 ECO / 36 DAY codes come from the correlation sessions, with no record of the presses.
+- So it is not known which button changes the mode (UP, DOWN or Pump 1), what order the
+  modes step in, whether f15 shows the mode, or how the change saves.
+
+The driver therefore changes no heat mode. `panel_menu.heat_mode_job` and
+`SundanceRS485.set_heat_mode` accept AUTO / ECO / DAY: when the spa already reads the asked mode
+they say so and press nothing, and any change raises `NotObserved` with the reason. **Missing
+capture:** a bridge log, with `RAW_FRAME_LOG` on, of a person changing HEAT AUTO → ECO → DAY →
+AUTO at the panel, naming each press and what the screen shows. That gives the edit states, the
+button, the step order and the save, and then the job can follow the FC / UV / H2O pattern.
 
 **Editing.** On DATE or TIME, UP opens the first field *unchanged* (24 / 35); the next UP steps
 it and the code turns into the *changed* one (25 / 36), as the home screen goes 56 → 57 while the
@@ -442,7 +487,7 @@ really XOR 56, the UV days during the walk.
 | state | screen | edit states |
 | --- | --- | --- |
 | 0 / 1 | home / set point flashing | |
-| 7, 11, 14 | PF, SF, HEAT | (not walked) |
+| 7, 11, 14 | PF, SF, HEAT | (not walked; HEAT: §3.11 *Heat mode*) |
 | 17 | FC | 18 opened, 19 changed |
 | 20 | UV | 21, 22 |
 | 23 | H2O | 24, 25 |
@@ -485,10 +530,21 @@ time** (`text` entities "Set Spa Date" / "Set Spa Time", and a "Sync Spa Clock" 
 `SPA_TZ`), and **the FC / UV / H2O days** (`number` entities, §3.12 — off-grid values land on
 the nearest step and say so). "Panel Menu Status" reports progress, refusals and the read-back.
 
-⚠️ **The time can only be moved within 1–11 o'clock of one half of the day** (and not from 11,
-since opening the hour steps it once). The AM/PM field and the 11 → 12 → 1 wrap are
-**decoded** (§3.11) but **the driver does not use them yet** — so no noon/midnight
-crossing from HA until `pybalboa/panel_menu.py` is taught them. DST's 2 AM → 1 AM is inside the limit.
+**Heat mode is read, not set.** HA shows it as the "Heat Mode" sensor (AUTO / ECO / DAY). It has
+no control, because the HEAT edit has never been recorded (§3.11 *Heat mode*); the library's
+`set_heat_mode` refuses every change. It is not offered as a climate `preset_mode`: HA's MQTT
+climate needs `preset_mode_command_topic` together with `preset_modes`, so a preset would be
+a control that refuses every pick. When the edit is captured and driven, `preset_mode` on the
+climate entity is the place for it (`modes = ["heat"]` stays).
+
+**The time can be set to any hour, across noon and midnight.** The driver steps the hour up
+through 12 (0 in the field), keys it by the minute held when the edit opened, and sets the AM/PM
+field (§3.11). The offline test `tools/test_menu.py` covers all 24 × 24 start and target hours
+and a clock tick mid-edit.
+
+Setting the clock across noon and across midnight is not yet confirmed on a live spa. The
+simulated panel takes its AM/PM and wrap behaviour from the saved panel captures. Stepping the
+hour DOWN through 12 has not been seen, so the driver only steps it up.
 
 **Set-point and pump presses are held while the panel shows a menu**: on a
 menu screen the temperature buttons edit the setting and Pump 1 accepts it.
@@ -549,14 +605,18 @@ while circulation runs on whenever pump 1 starts (3 of 3). What would settle it 
 
 ### 6.1b Where does the UV countdown end?
 There is no alert countdown in `f13`; the daily countdown is the UV days (§3.12), and its low
-3 bits are what looked like an 8-day wrap. Not settled: whether the UV countdown stops at 0,
+3 bits go 0 to 7 on an 8-day cycle (§3.2). That wrap is the 3-bit mask, not a stop or a latch of the UV countdown. Not settled: whether the UV countdown stops at 0,
 wraps, or latches, and where a flow / high-limit / water-change alert shows on the wire. The
 second needs a tub in a different alert state, which is not worth provoking.
 
 ### 6.2 Are `f3`, `f9`, `f12` the service counters?
 **Mostly answered (§3.11, §3.12):** `f9` is the **year**, not a counter; `f12` reads the H2O
-days and `f3` the FC days XOR 250, confirmed by edits at the panel. Still open: whether these
-count down daily — watch `f12` from 30 to see.
+days and `f3` the FC days XOR 250, confirmed by edits at the panel.
+
+**Daily countdown ✅ (from Home Assistant's recorder history, over 18 days).** All three timers
+(the water, filter and UV change days) fall by exactly 1 once per day, in step, at the spa
+clock's midnight. No day was skipped, and bridge restarts and `unavailable` gaps did not change
+a value. The step moved about 17 s earlier each day, so the spa clock gains about 17 s a day.
 
 They are constant over 48 h but differ between the correlation sessions and the three-day log:
 `f3` 241 → **250**, `f9` 23 → **14**, `f12` 2 → **0**, so they move on a scale of
@@ -591,9 +651,9 @@ GitHub.
 
 **Buttons — a pattern, with a circularity to avoid.** On this bus a press is **0xE0 + the
 Balboa/Jacuzzi button code**: Pump 1 228 = 0xE0+0x04, Pump 2 229 = +0x05, Light 241 = +0x11,
-Light 2 / colour 242 = +0x12. ⚠️ Those four are the only *independent* matches: pyjacuzzi's
-NothingPressed / TempUp / TempDown / ClearRay / Menu are marked as inferred from this project's
-earlier code, so they agree with us by construction.
+Light 2 / colour 242 = +0x12. ⚠️ Those four are the only *independent* matches. pyjacuzzi
+also lists NothingPressed, TempUp, TempDown, ClearRay and Menu, but marks them as inferred, so
+they do not confirm this bus's codes.
 The pattern predicts, untested: Pump 3 230 (0xE6), Blower 236 (0xEC), Mister 238 (0xEE),
 Aux 1/2 246/247. TempRange 0x50 and HeatMode 0x51 do not fit under 0xE0+, so their encoding
 here is unknown. ⛔ Predictions, not observations — §3.6's rule stands: send a code only after
@@ -608,9 +668,7 @@ They also have direct setters — set time (0x18 Jacuzzi, 0x21 Balboa), save fil
 reset/snooze the ClearRay and water timers — which would beat walking menus. **Nothing on this
 bus ever asks**: the factory panel only sends button presses, so the Sundance equivalents (if
 the encrypted family has them, presumably in the 0xC_ range like C4/CA/CC) have never been
-seen. Two ways to learn them: capture a SmartTub/ProLink module talking to this board, or send
-request frames in the encrypted format and watch for an answer — the second is active probing
-of an undocumented interface on a 4 kW heater, and the bridge does not do it.
+seen on this bus, and the bridge sends no request frames.
 
 **Fields the status frame probably still holds.** Jacuzzi's periodic PanelUpdate (0x16, the counterpart of our 0xC4)
 carries an **error code**, **lock bits**, **12/24-hour and °F/°C flags**, spa and heat
@@ -658,7 +716,7 @@ Boards and sources:
 |---|---|---|---|
 | **f0** | hour `^ 6` ✅ (per §2) | hour `^ 6` ✅ | hour `^ 6` ✅ ([pete-jorgensen/SundanceHotTub2MQTT#5](https://github.com/pete-jorgensen/SundanceHotTub2MQTT/issues/5), one capture) |
 | **f1** b2 | pump 2 ✅ (per §2) | Jet 2 running ✅ | unknown |
-| **f1** b3 | unknown | **Access Lock** active ✅ (2026-10); set from the ESP by the LOCK menu walk (confirmed by this bit) and released by one 0xCC 209 ✅ (2026-11-08) | unknown |
+| **f1** b3 | no test possible ❓ — clear in all 339 frames of the three later panel captures; no lock was set in them. GalKar83's report (sundance-rs485-controller README §6) gives Access Lock; it needs a 780 capture with the lock on (§7 open captures) | **Access Lock** active ✅ (2026-10); set from the ESP by the LOCK menu walk (confirmed by this bit) and released by one 0xCC 209 ✅ (2026-11-08) | unknown |
 | **f1** b5 | moves with circulation, unnamed 🟡 (per §6.1). At the one circulation start captured it set after b7 and before b6, all within one second (1 of 1); it also clears while circulation keeps running when pump 1 starts (3 of 3) and came back about 5 min after pump 1 stopped (1 seen) | Jet 1 low speed **commanded**; leads b6 by ~1 s 🟡. Also cleared by a Jets 1 press during the automatic circulation (f1 96 → 64) and back about 5 min later (1 seen, 2026-11-08), as on the 780 | unknown |
 | **f1** b6 | lags circulation, unnamed 🟡 (per §6.1) | Jet 1 low speed **running**, any reason ✅ | unknown |
 | **f1** b7 | manual circulation ✅ (per §3.1) | manual circulation (Jet 1 low started by the circulation button) ✅ | unknown |
@@ -666,9 +724,9 @@ Boards and sources:
 | **f2** b0–b2 | weekday, Sunday = 0 ✅ (424 frames, §6.3) | weekday, Sunday = 0 ✅ (22–25 Oct 2026, power-up date; Saturday 7 Nov = 6; with the date set to Wednesday 8 Jul 2026 = 3) | unknown |
 | **f2** b3 | unknown | Jet 1 low speed (pump side) ✅ | unknown |
 | **f2** b4 | pump 1 ✅ (per §2) | Jet 1 high speed ✅ | unknown |
-| **f2** b5 | a value is being **edited**, the set point included ✅ (18 of 18 rises came as `f13` entered an edit state, four captures); a set point change held it for 8 s (1 seen), as on the 680 | a menu value is being **edited** ✅ (2026-10); set for about 8 s after each set point change (2026-11-08) | unknown |
+| **f2** b5 | a value is being **edited**, the set point included ✅ (18 of 18 rises came as `f13` entered an edit state, four captures); a set point change held it for 8 s (1 seen), as on the 680. Agrees with GalKar83's report (sundance-rs485-controller README §6) on the three later panel captures: 16 rises, each with `f13` entering an edit screen, and each fall as the edit closes (for example `f2` 36 → 4 with `f15` 20 → 0 as an edit closes; five more falls in the panel walk and the service-timer edits likewise) | a menu value is being **edited** ✅ (2026-10); set for about 8 s after each set point change (2026-11-08) | unknown |
 | **f2** b6 | unknown | never set ❓ | unknown |
-| **f2** b7 | clear in all 424 saved frames (85 from the 2023 correlation sessions, 339 from the three October 2026 captures), including 23 with the year at 2014 ❓ | set while **Water Refresh is Off**, and after a power loss until the clock is set ✅ | unknown |
+| **f2** b7 | clear in all 424 saved frames (85 from the earlier correlation sessions, 339 from the three later panel captures), including 23 with the year at 2014 ❓. GalKar83's report (sundance-rs485-controller README §6) says set while Water Refresh is Off. Not testable here: `f12` = 0 in 27 of 86 panel-walk frames in the saved panel captures (before the H2O screen was visited) with b7 clear in all 27. So on the 780 either 0 meant "due" and not Off, or b7 does not exist. A capture with H2O saved as Off would decide it | set while **Water Refresh is Off**, and after a power loss until the clock is set ✅ | unknown |
 | **f3** | Filter Change days, `f3 ^ 250`; 250 = 0 ✅ (menu walk, §3.11) | Filter Change days, `f3 ^ 250`; raw 250 means Off **or** due ✅ | unknown |
 | **f4** | b6 = circulation pump running (either mode); rest constant `0b101` ✅ (per §3.1) | constant 6; no separate circulation pump on this model 🟡 | unknown |
 | **f5** | water temperature `^ 2`, °F ✅ (per §2) | water temperature `^ 2`; half °C in °C mode, whole °F in °F mode ✅ | `^ 2`, half °C (×2) ✅ ([pete-jorgensen/SundanceHotTub2MQTT#5](https://github.com/pete-jorgensen/SundanceHotTub2MQTT/issues/5)) |
@@ -676,17 +734,17 @@ Boards and sources:
 | **f7** | `(day << 3) XOR month` ✅ (§3.3) | `(day << 3) XOR month` ✅ (8 Jul 2026 set on the spa, 2026-11-07); ambiguous, e.g. 22 Oct and 23 Feb both 186 | unknown |
 | **f8** | set point, °F ✅ (per §2) | set point; half °C or whole °F ✅ | half °C (×2) ✅ ([pete-jorgensen/SundanceHotTub2MQTT#5](https://github.com/pete-jorgensen/SundanceHotTub2MQTT/issues/5)) |
 | **f9** | year − 2000, **no XOR** ✅ (§3.3) | year − 2000 **XOR 1** ✅ (2026; power-up default reads 2014) | year − 2000, no XOR ✅ ([pete-jorgensen/SundanceHotTub2MQTT#5](https://github.com/pete-jorgensen/SundanceHotTub2MQTT/issues/5): 26) |
-| **f10** b4 | unknown | **Temperature Lock** active ✅ (2026-10); set from the ESP by the LOCK menu walk (confirmed by this bit) and released by one 0xCC 209 ✅ (2026-11-08) | unknown |
+| **f10** b4 | no test possible ❓ — clear in all 339 frames of the three later panel captures; no lock was set in them. GalKar83's report (sundance-rs485-controller README §6) gives Temperature Lock; it needs a 780 capture with the lock on | **Temperature Lock** active ✅ (2026-10); set from the ESP by the LOCK menu walk (confirmed by this bit) and released by one 0xCC 209 ✅ (2026-11-08) | unknown |
 | **f10** b6 | heater on ✅ (per §2) | heater on ✅ (forced run 2026-11-08: set 5 s after the set point was raised by 1 °C; cleared 4 min 45 s after it came on, with the set point restored after 35 s) | unknown |
 | **f10** b7 | automatic circulation ✅ (per §3.1) | scheduled filtration cycle (including the daily cleanup) and the power-up purge ✅ | unknown |
 | **f10** b0–b3, b5 | unknown | never set ❓ (candidates: alerts or faults) | unknown |
 | **f11** | minute ✅ (per §2) | b0–b6 minute ✅; b7 never set ❓ | minute ✅ ([pete-jorgensen/SundanceHotTub2MQTT#5](https://github.com/pete-jorgensen/SundanceHotTub2MQTT/issues/5)) |
 | **f12** | Water Refresh days, plain ✅ (§3.12) | Water Refresh days, plain; 0 = Off or due (f2 b7 tells them apart) ✅ | unknown |
 | **f13** | panel state XOR the UV (ClearRay) days ✅ (§3.12) | screen code XOR key; key = (ClearRay days & 0xFF) XOR 78, so the main screen reads as the low byte of the counter ✅ (set on the spa 2026-10-31; counter above 255 checked) | unknown |
-| **f14** | temperature-like value V, **XOR 32 while the circulation pump runs** ✅: with b5 undone, `(f5 ^ 2) − f14` is −1 to +3 in 424 of 424 frames (four captures, both circulation states); b5 flipped at the one circulation start captured and at neither pump 1 edge (0 of 2). b6 has been 1 in every frame (only °F seen); b7 a flag, n = 3, meaning unknown (§3.4) | slow value V (about −1 per hour idle, rises while the pump runs; meaning unknown ❓) XOR flags: b1 flips with the Settings Lock and b2 with the Service Lock (seen as a flip within 5 s of the panel event, 2026-10-25; the absolute lock state cannot be read from f14 alone because V is unknown), b5 flips while the pump runs, b6 = °F ✅; b7 never seen | unknown |
+| **f14** | temperature-like value V, **XOR 32 while the circulation pump runs** ✅: with b5 undone, `(f5 ^ 2) − f14` is −1 to +3 in 424 of 424 frames (four captures, both circulation states); b5 flipped at the one circulation start captured and at neither pump 1 edge (0 of 2). b6 has been 1 in every frame (only °F seen); b7 a flag, n = 3, meaning unknown (§3.4). GalKar83's report (sundance-rs485-controller README §6) names b1 = Settings Lock, b2 = Service Lock, b6 = °F. Not testable here: the only `f14` changes with b1 or b2 flipped are V dither and pump starts (for example, in the saved light and clock capture, 98 → 68 as the pump starts), and no lock event is in any capture. b6 agrees but is one-sided (set in every frame, never a °C frame) | slow value V (about −1 per hour idle, rises while the pump runs; meaning unknown ❓) XOR flags: b1 flips with the Settings Lock and b2 with the Service Lock (seen as a flip within 5 s of the panel event, 2026-10-25; the absolute lock state cannot be read from f14 alone because V is unknown), b5 flips while the pump runs, b6 = °F ✅; b7 never seen | unknown |
 | **f15** | the value of the menu field being edited; 0 otherwise ✅ (§3.11; the hour and minute are keyed by each other) | value shown on the current menu screen; encoding depends on the screen ✅. LANG edit screen, key 117 (2026-11-08): English reads 1 and the Warmer cycle goes 1 → 2 → 3 → 0, so the language code is shifted by an amount that depends on the daily key (rule not found yet) | unknown |
 | **frame** | `C4` payload 33 bytes, `CA` 29; the fold reads all but the last, and the last byte is the per-frame mask (the first payload byte XOR 38 in `C4`, XOR 102 in `CA`), no data seen in it ✅ (§3.8). In `CA`, mask ^ (`0x24` + position) leaves plaintext (622 of 622 frames); in `C4` not in that form ❓ | `C4` payload 33 bytes, `CA` 29, the last byte is the per-frame mask: the first payload byte XOR 38 in `C4` (43 of 43 frames), XOR 102 in `CA` (all frames), as on the 780 ✅ (live raw frames, 2026-11-08). `CA` at rest after XOR with the last byte is `66 DA 26 27 28 29 2A 4F 2C 2D 2E D0 30 … 3F`, the 780 pattern. In `C4` the fixed bytes agree with the 780's where both are constant (positions 0, 4, 7, 11, 12, 13, 17; also 3 and 9, which on the 780 are constant only while circulation is off: at the one circulation start rebuilt there, 3 carried f1 b7 and 9 carried f4 b6); the positions that moved in the set point, light, Jets 1 and heater tests were only f1 (2), f2 (5), f8 (16), f10 (21), f11 (22), f13 (26) and f15 (30, 31), so nothing hidden was seen in `C4` ✅ | payload four bytes longer (per [garbled1/pybalboa#122](https://github.com/garbled1/pybalboa/issues/122)) |
-| **0xCC** | code = `a ^ b`, **no `^ 1`** (the bridge sends `code, 0`): Up 225, Down 226, Pump 1 228, Pump 2 229, Circulation 239, light 241 / 242, Menu 254, all seen as panel presses ✅; 224 = nothing pressed. 228 started pump 1 (1 of 1), 229 pump 2 (2 of 2). In this form §5b's four frames are 229, 229, 228, 228 | code = `a ^ b`, no `^ 1` (the firmware log prints `a ^ b ^ 1`, the code with bit 0 flipped): idle 224; Warmer 225, Cooler 226, Jets 1 228, Jets 2 229, Circulation 239, light 241/242, Menu 254, Menu held 209 ✅. A single 209 sent from the ESP's own channel, with no 254 stream before it, releases Access, Temperature, Settings and Service Lock ✅ (2026-11-08); the controller also applies the locks to the ESP's own presses (Temperature Lock: the set point is never accepted; Access Lock: the light does not change) ✅ | unknown |
+| **0xCC** | code = `a ^ b`, **no `^ 1`** (the bridge sends `code, 0`): Up 225, Down 226, Pump 1 228, Pump 2 229, Circulation 239, light 241 / 242, Menu 254, all seen as panel presses ✅; 224 = nothing pressed. 228 started pump 1 (1 of 1), 229 pump 2 (2 of 2). In this form §5b's four frames are 229, 229, 228, 228 | code = `a ^ b`, no `^ 1` (the contributor's ESP firmware log prints `a ^ b ^ 1`, the code with bit 0 flipped): idle 224; Warmer 225, Cooler 226, Jets 1 228, Jets 2 229, Circulation 239, light 241/242, Menu 254, Menu held 209 ✅. A single 209 sent from the ESP's own channel, with no 254 stream before it, releases Access, Temperature, Settings and Service Lock ✅ (2026-11-08); the controller also applies the locks to the ESP's own presses (Temperature Lock: the set point is never accepted; Access Lock: the light does not change) ✅ | unknown |
 | **0xCA** | same positions ✅ (§3.5, 621 frames, colours read at the panel): L1 brightness 100 / 66 / 33; L4 mode, 128 = colour fade, fixed colours 2 blue, 7 magenta, 6 red; L2 / L6 / L8 = B / G / R; L9 cycle time, 2 or 4 in fade, 0 on a fixed colour; L0 = 189, L3 = 60, L5 = 255 constant | same positions ✅ (30 Oct 2026 light-cycle test): L1 100 on / 0 off (no brightness steps), L4 mode, L2 = blue, L6 = green, L8 = red, 0–255 per mode (Blue 2: L2 255; Green 3: L6 255; Red 6: L8 255; Violet 7: L2 = L8 = 127); L9 blend speed (2 fast, 4 slow); L0 = 189, L3 = 100, L5 = 255 constant; L7 0 so far ❓ | unknown |
 
 Differences worth noting between models: f9 (the extra XOR on the 680), f4 (the circulation pump
@@ -697,8 +755,8 @@ Jet 1 is a two-speed pump. Bit 5 of f14 flips with whichever pump circulates: th
 680) and in L3 (60 vs 100).
 
 On the 780 the `a ^ b ^ 1` fold is for the `C4` and `CA` payloads; a `0xCC` button code is read as
-`a ^ b`. The 680 code list above matches the 780's code for code, and the 680 firmware reads `a ^ b` as
-well, so the two boards use one form.
+`a ^ b`. The 680 code list above matches the 780's code for code, and GalKar83's ESP firmware for the 680
+reads `a ^ b` as well, so the two boards use one form.
 
 ### 7.1 To verify
 

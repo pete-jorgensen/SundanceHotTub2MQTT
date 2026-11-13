@@ -49,18 +49,21 @@ Created by discovery under the `homeassistant/` prefix, device **hottub**:
 | --- | --- | --- |
 | Temperature | `climate` | Current temp, set temp, heat action; °F, 60–104 °F |
 | Pump1, Pump2 | `switch` | Jet pumps |
-| ManualCircPump | `switch` | The ClearRay / manual circulation button |
+| ManualCircPump | `switch` | The ClearRay / manual circulation button. Starts a manual run from off, stops one from manual. While circulation runs for heat, a filter cycle or the jets, the spa ignores the button, so the bridge refuses the command (`DECODING.md` §3.1) |
+| Circulation Locked | `binary_sensor` | On while circulation runs automatically and the manual switch cannot change it |
+| Last Command | `sensor` | The last command the bridge refused or stopped, and why. A set point stops after 64 unanswered presses, a pump or ClearRay after 10 |
 | CirculationPump | `binary_sensor` | Circulation pump running (either mode) |
 | Lights | `light` | On/off, brightness 0–100, effect = colour mode |
 | Spa clock, spa date, heat mode, second temperature, circulation mode, auto / manual circulation, light cycle time, panel screen | `sensor` / `binary_sensor` | Read-only |
-| Set Spa Time, Set Spa Date | `text` | Show the spa's clock / date; type `HH:MM` or `YYYY-MM-DD` to set it through the panel menus. The time can't yet be moved across noon or midnight, or to/from 11–12 o'clock (`DECODING.md` §4) |
+| Set Spa Time, Set Spa Date | `text` | Show the spa's clock / date; type `HH:MM` or `YYYY-MM-DD` to set it through the panel menus. Any time works, including across noon and midnight (`DECODING.md` §4; not yet tried on the live spa) |
 | Sync Spa Clock | `button` | Sets the spa's date and time to now in `SPA_TZ` |
 | Filter Change Days, UV Change Days, Water Change Days | `number` | The service timers; set them here (FC and UV move in 10-day steps, H2O in 30 — a value between steps lands on the nearest) |
 | Panel Menu Status | `sensor` | Diagnostic: queued / running / done, read-back, or why a request was refused |
 | Raw undecoded protocol fields | `sensor` | Diagnostic, disabled by default — for answering long-baseline questions from the recorder |
 
 Light effects: Off, White, Blue, Violet, Red, Amber, Green, Aqua, Slow Blend, Fast Blend,
-Frozen Blend. Heat modes decoded: AUTO, ECO, DAY.
+Frozen Blend. Heat modes decoded: AUTO, ECO, DAY. The heat mode is read-only: its panel edit
+has not been recorded yet, so the bridge does not change it (`DECODING.md` §3.11 *Heat mode*).
 
 **Only Sundance tubs.** Jacuzzi tubs emit a different, plaintext message family (`0x16` /
 `0x17` / `0x23`); run through the Sundance XOR decoder they produce plausible nonsense, so they
@@ -131,7 +134,7 @@ pressing MENU mid-job): `python3 tools/test_menu.py`.
 | --- | --- |
 | `pybalboa/app.py` | The bridge: MQTT discovery, state publishing, command handling |
 | `pybalboa/sundanceRS485.py` | `SundanceRS485` — channel negotiation, frame decoding, button emulation |
-| `pybalboa/panel_menu.py` | Setting the clock and date by walking the panel menus — closed-loop, no I/O |
+| `pybalboa/panel_menu.py` | Setting the clock, date and service timers by walking the panel menus — closed-loop, no I/O; the heat-mode refusal |
 | `pybalboa/balboa.py` | Upstream `BalboaSpaWifi` base class |
 | `pybalboa/__main__.py`, `pybalboa/testSundanceRS485.py` | Console read-outs for poking at a live tub |
 | `DECODING.md` | The protocol record: every field, its confidence, the evidence, open questions |
@@ -157,6 +160,19 @@ here.
 Built on top of [garbled1/pybalboa](https://github.com/garbled1/pybalboa) (Tim Rightnour,
 Nathan Spencer) — the `BalboaSpaWifi` base class — extended here with the `SundanceRS485`
 subclass that implements the RS485 channel negotiation and the Sundance message decoding.
+
+## Related projects
+
+Other projects speak the same family of RS485 protocols. Pick by what your spa and your host are.
+
+- [garbled1/pybalboa](https://github.com/garbled1/pybalboa) (Apache-2.0): the Python library for Balboa spas. Home Assistant's own `balboa` integration uses it. This repo's Sundance decode is proposed as a Sundance client for it in [issue #122](https://github.com/garbled1/pybalboa/issues/122). Use it if your spa has a Balboa Wi-Fi module.
+- [Iraithium/sundance-rs485-controller](https://github.com/Iraithium/sundance-rs485-controller): an ESPHome component for Sundance spas on a plain ESP32, built on this decode. Home Assistant finds it with no MQTT bridge. The repository has no licence file, so this README links to it and does not reuse it.
+- [dhmsjs/pyjacuzzi](https://github.com/dhmsjs/pyjacuzzi) (Apache-2.0): a Python decoder for Jacuzzi spas that extends pybalboa. This repo is Sundance-only, so Jacuzzi owners should start here.
+- [jackbrown1993/Jacuzzi-RS485](https://github.com/jackbrown1993/Jacuzzi-RS485): an RS485 bridge for the Jacuzzi J335. Jacuzzi owners should read it.
+- [ccutrer/balboa_worldwide_app](https://github.com/ccutrer/balboa_worldwide_app): a Ruby bridge that publishes Balboa spas over MQTT. It has no licence file. Use it if you prefer Ruby and have a standard Balboa board.
+- [brianfeucht/esphome-balboa-spa](https://github.com/brianfeucht/esphome-balboa-spa) (BSD-2-Clause): an ESPHome component for Balboa spas, written in C++. Use it if you want an ESP device instead of a container.
+
+pybalboa and the Sundance base class credited above are the code origin of this repo, so they are not repeated as credits here.
 
 ## License
 

@@ -31,6 +31,7 @@ class Panel:
         self.h, self.mi = hm
         self.fc, self.uv, self.h2o = service
         self.screen, self.edit = M.HOME, 0
+        self.hold = self.mi         # the minute held by an open TIME edit (the hour field's key)
         self.fields = None          # the open edit: [state, value] pairs being changed
         self.pos = 0
         self.origin = None          # the menu screen the edit was opened from
@@ -47,12 +48,17 @@ class Panel:
         """f15 for the open edit field."""
         code, v = self.fields[self.pos]
         if code == M.TIME_EDIT[0]:
-            return (v % 12 or 12) ^ self.mi            # the hour, keyed by the running minute
+            return v ^ self.hold                       # the hour (12 is 0), keyed by the minute
+            #                                            held when the edit OPENED, not the live one
         if code == M.TIME_EDIT[1]:
-            return v ^ (self.fields[0][1] % 12 or 12)  # the minute, keyed by the hour set
-        if code == M.TIME_EDIT[2]:
-            return 1 if self.h >= 12 else 0
-        return v
+            return v ^ self.fields[0][1]               # the minute, keyed by the hour set (12 is 0)
+        return v                                       # AM/PM: 1 = PM, 0 = AM, independent of the hour
+
+    def tick(self):
+        """The running clock gains a minute (and rolls the hour), as it does mid-edit."""
+        self.mi += 1
+        if self.mi == 60:
+            self.mi, self.h = 0, (self.h + 1) % 24
 
     def _service(self, name):
         return {"FC": self.fc, "UV": self.uv, "H2O": self.h2o}[name]
@@ -69,9 +75,9 @@ class Panel:
                 if name == "DATE":                     # the year does not step (live: 32 -> 33 at 26)
                     self.fields = [[M.DATE_EDIT[0], self.y - 2000], [M.DATE_EDIT[1], self.mo],
                                    [M.DATE_EDIT[2], self.d]]
-                elif name == "TIME":                   # the hour does (live: 7 -> 8 PM)
-                    self.fields = [[M.TIME_EDIT[0], self.h + 1], [M.TIME_EDIT[1], self.mi],
-                                   [M.TIME_EDIT[2], 0]]
+                elif name == "TIME":                   # the hour does (live: 7 -> 8 PM; 11 -> 12)
+                    self.fields = [[M.TIME_EDIT[0], (self.h + 1) % 12], [M.TIME_EDIT[1], self.mi],
+                                   [M.TIME_EDIT[2], 1 if self.h >= 12 else 0]]
                 else:
                     g = GRID[name]
                     v = self._service(name)
@@ -79,8 +85,8 @@ class Panel:
                 self.pos = 0
             elif button == M.BTN_SELECT and name == "TIME":   # P1 pressed on screen 35 (hour unchanged) -> minute
                 self.opened = None
-                self.fields = [[M.TIME_EDIT[0], self.h], [M.TIME_EDIT[1], self.mi],
-                               [M.TIME_EDIT[2], 0]]
+                self.fields = [[M.TIME_EDIT[0], self.h % 12], [M.TIME_EDIT[1], self.mi],
+                               [M.TIME_EDIT[2], 1 if self.h >= 12 else 0]]
                 self.pos = 1
             self._show()
             return
@@ -91,8 +97,9 @@ class Panel:
                 self.origin = self.screen
                 self.opened = names[self.screen]
                 self.screen = M.OPENED[self.opened]
+                self.hold = self.mi                    # the minute the TIME edit holds from now on
                 self.edit = self._service(self.opened) if self.opened in GRID else \
-                    ((self.h % 12 or 12) ^ self.mi if self.opened == "TIME" else 0)
+                    ((self.h % 12) ^ self.mi if self.opened == "TIME" else 0)
                 return
             self._show()
             return
@@ -101,7 +108,12 @@ class Panel:
         if button in (M.BTN_UP, M.BTN_DOWN):
             step = GRID.get(name, 1)
             f[1] += step if button == M.BTN_UP else -step
-            f[1] = max(f[1], 0)
+            if name == "TIME" and f[0] == M.TIME_EDIT[0]:
+                f[1] %= 12                              # the hour wraps 11 -> 0 (12) -> 1
+            elif name == "TIME" and f[0] == M.TIME_EDIT[2]:
+                f[1] = min(max(f[1], 0), 1)
+            else:
+                f[1] = max(f[1], 0)
         elif button == M.BTN_SELECT:
             self.pos += 1
             if self.pos == len(self.fields):
@@ -109,7 +121,7 @@ class Panel:
                 if name == "DATE":
                     self.y, self.mo, self.d = 2000 + vals[0], vals[1], vals[2]
                 elif name == "TIME":
-                    self.h, self.mi = vals[0], vals[1]
+                    self.h, self.mi = vals[0] + 12 * vals[2], vals[1]   # hour 0 is 12 o'clock
                 elif name == "FC":
                     self.fc = vals[0]
                 elif name == "UV":
@@ -138,7 +150,7 @@ class Readback:
         self.filterDays, self.uvDays, self.waterDays = p.fc, p.uv, p.h2o
 
 
-def drive(job, panel, max_frames=3000):
+def drive(job, panel, max_frames=3000, tick_at=None):
     """Run a job to completion as the spa would: one press per frame at most, taking effect a
     frame later; the state is decoded with the key the bridge knows, re-keyed when UV saves."""
     if job.precheck:
@@ -147,8 +159,10 @@ def drive(job, panel, max_frames=3000):
             job.fail(why)
             return job
     pending, t, key = None, 0.0, panel.uv
-    for _ in range(max_frames):
+    for frame_no in range(max_frames):
         t += 0.5
+        if tick_at is not None and frame_no == tick_at:
+            panel.tick()
         if pending is not None:
             panel.press(pending)
             pending = None
@@ -192,16 +206,70 @@ for start, target in (((14, 13), (18, 37)), ((19, 50), (18, 5)), ((1, 5), (10, 5
     check("time: %02d:%02d -> %02d:%02d" % (start + target),
           j.status.startswith("done") and (p.h, p.mi) == target, (j.status, p.h, p.mi))
 
-p = Panel(hm=(11, 30))
-j = drive(M.time_job(13, 0, p.h), p)
-check("time: refuses to cross noon until AM/PM is decoded, and presses nothing",
-      j.status.startswith("failed") and not p.presses, (j.status, p.presses))
-
-for start, target in (((11, 5), (10, 0)), ((9, 0), (12, 0)), ((23, 0), (13, 0))):
+# Noon and midnight (DECODING.md 3.11): 12 o'clock is 0 in the hour field, AM/PM is its own field.
+# 11:59 -> 12:00 and 23:59 -> 00:00 are the two crossings; a set across each; and then every
+# start hour against every target hour, so no 11 -> 12 -> 1 wrap or AM/PM flip is left untried.
+for start, target in (((11, 59), (12, 0)), ((23, 59), (0, 0)), ((11, 20), (12, 5)), ((23, 50), (0, 10)),
+                      ((11, 30), (13, 0)), ((9, 0), (12, 0)), ((23, 0), (13, 0)), ((11, 5), (10, 0)),
+                      ((12, 0), (11, 59)), ((0, 0), (23, 59)), ((12, 30), (0, 30)), ((0, 15), (12, 15))):
     p = Panel(hm=start)
     j = drive(M.time_job(target[0], target[1], p.h), p)
-    check("time: refuses %02d:%02d -> %02d:%02d (12 o'clock, or 11 + the opening step)" % (start + target),
-          j.status.startswith("failed") and not p.presses, (j.status, p.presses))
+    check("time: %02d:%02d -> %02d:%02d across noon / midnight / 12 o'clock" % (start + target),
+          j.status.startswith("done") and (p.h, p.mi) == target, (j.status, p.h, p.mi))
+
+bad = []
+for sh in range(24):
+    for th in range(24):
+        p = Panel(hm=(sh, 17))
+        j = drive(M.time_job(th, 41, p.h), p)
+        if not (j.status.startswith("done") and (p.h, p.mi) == (th, 41)):
+            bad.append((sh, th, j.status, p.h, p.mi))
+check("time: all 24 x 24 start/target hours set exactly (%d failed)" % len(bad), not bad, bad[:3])
+
+# The clock ticks while the edit is open (it does: the walk's 25 -> 26 mid-edit). The hour field
+# keeps its key from the minute the edit opened, so the job must not follow the live minute -
+# including a tick that rolls the hour over (11:59 -> 12:00, 23:59 -> 00:00).
+bad = []
+for start in ((11, 59), (23, 59), (6, 25), (12, 59), (0, 59)):
+    for target in ((12, 0), (0, 0), (13, 5), (1, 5), (6, 30), (18, 25)):
+        for tick_at in range(0, 70, 3):
+            p = Panel(hm=start)
+            j = drive(M.time_job(target[0], target[1], p.h), p, tick_at=tick_at)
+            if not j.status.startswith("done"):
+                bad.append((start, target, tick_at, j.status))
+check("time: a clock tick mid-edit does not break the hour key (%d failed)" % len(bad), not bad, bad[:3])
+
+# A recorded light-and-clock walk, when present: the hour field read off the real panel,
+# keyed by the minute held at the edit's opening, steps 7 .. 11, 12 (0), and 2 .. 6 at 01:27.
+# The capture is not shipped with the repository, so these checks skip without it.
+capture = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "docs", "captures",
+                       "lights-clock-2026-10-26.txt")
+CAPTURE_CHECKS = (
+    "capture: hour field at 18:25 reads 7, 8, 9, 10, 11, 12 (0)",
+    "capture: hour field at 01:27 reads 2, 3, 4, 5, 6",
+    "capture: the minute edit after setting 12 o'clock reads 25 ^ 0 = 25",
+    "capture: the minute edit with 6 set reads 29 = 27 ^ 6 and 26 = 28 ^ 6",
+)
+if os.path.exists(capture):
+    held, seen_hours, seen_minutes = None, [[]], []
+    with open(capture) as f:
+        for line in f:
+            if "TIME (unchanged) edit:" in line:
+                held = int(line.split("INFO:sundanceRS485:")[1].split()[1].split(":")[1])   # the clock's minute
+                seen_hours.append([])
+            elif "TIME hour edit:" in line and held is not None:
+                seen_hours[-1].append(M.hour12_value(int(line.split("edit:")[1].split()[0]), {"minute": held}))
+            elif "TIME minute edit:" in line:
+                seen_minutes.append(int(line.split("edit:")[1].split()[0]))
+    check(CAPTURE_CHECKS[0], [7, 8, 9, 10, 11, 0] in seen_hours, seen_hours)
+    check(CAPTURE_CHECKS[1], [2, 3, 4, 5, 6] in seen_hours, seen_hours)
+    check(CAPTURE_CHECKS[2], M.minute_value_for(12)(25, {}) == 25 and 25 in seen_minutes, seen_minutes)
+    check(CAPTURE_CHECKS[3], [M.minute_value_for(6)(r, {}) for r in (29, 26)] == [27, 28], seen_minutes)
+else:
+    for name in CAPTURE_CHECKS:
+        print("SKIP  %s (capture not present)" % name)
+check("hour decode: 12 o'clock is 0, and 12 is not read as 12", M.hour12_value(25, {"minute": 25}) == 0
+      and M.hour12_value(12 ^ 25, {"minute": 25}) is None)
 
 p = Panel(hm=(18, 37))
 j = drive(M.time_job(18, 37, p.h), p)
@@ -355,6 +423,46 @@ for _ in range(3):
     asyncio.run(spa.parse_C4status_update(c4(p)))
 check("spa: ... and it goes out once the panel is home", [m[5] for m in spa.queue.queue][:1] == [S.BTN_P1],
       [m[5] for m in spa.queue.queue])
+
+# Heat mode (DECODING.md 3.11): the HEAT edit was never recorded, so no change is driven.
+check("heat: the driver knows no HEAT edit state (none was recorded)",
+      "HEAT" not in M.OPENED and not any(c in M.EDIT_CODES for c in (M.SCREEN["HEAT"] + 1, M.SCREEN["HEAT"] + 2)))
+for mode, current in (("ECO", 32), ("DAY", 32), ("AUTO", 34)):
+    try:
+        M.heat_mode_job(mode, current)
+        check("heat: %s from f6 %d is refused" % (mode, current), False, "accepted")
+    except M.NotObserved as e:
+        check("heat: %s from f6 %d is refused, naming the missing capture" % (mode, current),
+              "never been recorded" in str(e) and "Needed:" in str(e), str(e))
+check("heat: an already-right mode needs no job", M.heat_mode_job("auto", 32) is None)
+for mode, current in (("BOOST", 32), ("AUTO", -1), ("ECO", 16)):
+    try:
+        M.heat_mode_job(mode, current)
+        check("heat: rejects %r with f6 %r" % (mode, current), False, "accepted")
+    except M.NotObserved:
+        check("heat: rejects %r with f6 %r as bad input, not as unrecorded" % (mode, current), False, "NotObserved")
+    except ValueError:
+        check("heat: rejects %r with f6 %r" % (mode, current), True)
+
+spa = S.SundanceRS485("127.0.0.1")
+spa.log.setLevel(50)
+spa.connected, spa.channel = True, 17
+p = Panel()
+asyncio.run(spa.parse_C4status_update(c4(p)))          # f6 = 32 AUTO in BASE
+asyncio.run(spa.set_heat_mode("AUTO"))
+for _ in range(5):
+    asyncio.run(spa.parse_C4status_update(c4(p)))
+check("spa: heat mode already AUTO - reported, no job, no press",
+      spa.menuStatus.startswith("done") and "already AUTO" in spa.menuStatus and not spa.menuJobs
+      and spa.queue.empty(), (spa.menuStatus, spa.menuJobs, list(spa.queue.queue)))
+try:
+    asyncio.run(spa.set_heat_mode("ECO"))
+    check("spa: heat mode ECO is refused", False, "accepted")
+except M.NotObserved:
+    for _ in range(5):
+        asyncio.run(spa.parse_C4status_update(c4(p)))
+    check("spa: heat mode ECO is refused and nothing is queued or pressed",
+          not spa.menuJobs and spa.queue.empty(), (spa.menuJobs, list(spa.queue.queue)))
 
 if __name__ == "__main__":
     ok = all(results)

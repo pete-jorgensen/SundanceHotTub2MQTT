@@ -15,9 +15,9 @@ python3 tools/analyse_c4.py frames.txt    # per-field value distribution + per-b
 python3 tools/correlate.py  frames.txt    # cross-tabulate the flag bits against each other
 ```
 
-**Read `DECODING.md` §0 before drawing conclusions.** Logs from older versions of the bridge
-only carry a frame when an *unknown* field changed, so frames where only a known field moved
-are missing there; the bridge now logs every changed frame. "This field is
+**Read `DECODING.md` §0 before drawing conclusions.** The bridge logs every frame that differs
+from the one before it; `DECODING.md` §0 says which of the saved samples were logged with a
+narrower filter, and what that does to frame counts. "This field is
 constant" and "bit A tracks bit B" survive that bias; "this pump only ran twice" does not.
 
 `analyse_c4.py` produced the field table in `DECODING.md` §2; `correlate.py` produced the
@@ -31,7 +31,7 @@ circulation-signal matrix in §3.1 and the display-vs-date table in §3.2. The t
 with that date's weekday (Sunday = 0) — the evidence for `DECODING.md` §6.3:
 
 ```sh
-python3 tools/weekday_f2.py captures/*.txt
+python3 tools/weekday_f2.py <your own captured bridge logs>
 ```
 
 ## Cross-model check
@@ -42,7 +42,7 @@ bit 5, `f1` b5 / b6 / b7 transitions with their times, `(f5 ^ 2) − f14` with a
 bit 5 undone, and every `f2` bit 5 edge:
 
 ```sh
-python3 tools/cross_model_check.py captures/*.txt
+python3 tools/cross_model_check.py <your own captured bridge logs>
 ```
 
 ## Panel walk timeline

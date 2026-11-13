@@ -111,6 +111,10 @@ EXTRA_SENSORS = [
     ('circ_mode',         'sensor',        'Circulation Mode',      {'icon': 'mdi:pump'},                                        lambda s: s.circMode),
     ('circ_auto',         'binary_sensor', 'Auto Circulation',      {'icon': 'mdi:autorenew'},                                   lambda s: s.autoCirc),
     ('circ_manual',       'binary_sensor', 'Manual Circulation',    {'icon': 'mdi:hand-water'},                                  lambda s: s.manualCirc),
+    # On while circulation runs for heat, a filter cycle or the jets: the manual switch
+    # cannot change it then (DECODING.md 3.1), and the bridge refuses the command.
+    ('circ_locked',       'binary_sensor', 'Circulation Locked',    {'icon': 'mdi:lock-outline'},                                lambda s: s.circLocked),
+    ('command_status',    'sensor',        'Last Command',          {'icon': 'mdi:message-alert-outline'},                       lambda s: s.commandStatus[:255]),
     ('light_cycle_time',  'sensor',        'Light Cycle Time',      dict(DIAG, icon='mdi:timer-outline'),                        lambda s: s.lightCycleTime),
     # Raw undecoded fields. Off by default - they exist so the long-baseline questions in
     # DECODING.md 6.2 can be answered from the HA recorder instead of a bespoke capture.
@@ -265,6 +269,7 @@ def _menu_command(loop, topic, payload):
 
 
 last_menu_status = None
+last_command_status = None
 
 
 async def read_spa_data(spa, lastupd):
@@ -371,6 +376,12 @@ async def read_spa_data(spa, lastupd):
         else:
             mqtt_client.publish(light_state_topic, 0, retain=True)   
  
+    # A refusal happens on a command, not on a frame, so publish it the moment it changes.
+    global last_command_status
+    if spa.commandStatus != last_command_status:
+        last_command_status = spa.commandStatus
+        mqtt_client.publish(extra_state_topic['command_status'], spa.commandStatus[:255], retain=True)
+
     global last_menu_status
     if spa.menuStatus != last_menu_status:
         last_menu_status = spa.menuStatus
