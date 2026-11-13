@@ -80,6 +80,18 @@ raise an "Unknown Message" warning instead. The evidence is in
 - **Host:** a Raspberry Pi 4 running Docker, on the same LAN as the gateway and the Mosquitto
   broker that Home Assistant uses.
 
+![The top edge of a Sundance 780 control board (Jacuzzi Products Co. PN 24168_C): water and
+hi-limit temperature sensors at the left, the three MAIN PANEL sockets, then Zone 2 and Zone
+1](img/780-board-top.jpg)
+
+![Close-up of the three 4-pin MAIN PANEL sockets (J13, J14, J15), with the topside panel
+cable in J13](img/780-main-panel-connectors.jpg)
+
+On the 780 board (marked Jacuzzi Products Co. PN 24168_C) the panel bus has three 4-pin
+(2×2) sockets marked **MAIN PANEL**: J13, J14 and J15, along the top edge. The topside
+panel's cable uses one of them. The pin order is not recorded here, so
+find A, B and ground on your own board before you connect anything.
+
 > **Wiring into the RS485 bus is at your own risk.** You are joining the same bus the factory
 > panel uses. Check polarity, and that the gateway is set to RS485, not RS232. See the
 > disclaimer at the end.
