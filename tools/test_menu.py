@@ -241,9 +241,9 @@ check("time: a clock tick mid-edit does not break the hour key (%d failed)" % le
 
 # A recorded light-and-clock walk, when present: the hour field read off the real panel,
 # keyed by the minute held at the edit's opening, steps 7 .. 11, 12 (0), and 2 .. 6 at 01:27.
-# The capture is not shipped with the repository, so these checks skip without it.
-capture = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "docs", "captures",
-                       "lights-clock-2026-10-26.txt")
+# The capture is not shipped with the repository. Name a bridge log of such a walk in
+# MENU_CAPTURE to run these checks; without it they skip.
+capture = os.environ.get("MENU_CAPTURE", "")
 CAPTURE_CHECKS = (
     "capture: hour field at 18:25 reads 7, 8, 9, 10, 11, 12 (0)",
     "capture: hour field at 01:27 reads 2, 3, 4, 5, 6",
@@ -267,7 +267,7 @@ if os.path.exists(capture):
     check(CAPTURE_CHECKS[3], [M.minute_value_for(6)(r, {}) for r in (29, 26)] == [27, 28], seen_minutes)
 else:
     for name in CAPTURE_CHECKS:
-        print("SKIP  %s (capture not present)" % name)
+        print("SKIP  %s (MENU_CAPTURE not set or not found)" % name)
 check("hour decode: 12 o'clock is 0, and 12 is not read as 12", M.hour12_value(25, {"minute": 25}) == 0
       and M.hour12_value(12 ^ 25, {"minute": 25}) is None)
 

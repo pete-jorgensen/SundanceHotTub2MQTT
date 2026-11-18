@@ -387,8 +387,8 @@ def service_job(name, days, uv_now):
 # ever been recorded: no capture holds state 15 or 16, f6 is 32 in every saved frame, and
 # nothing says which button changes the mode, in what order the modes step, or how it saves
 # (DECODING.md 3.11). So the driver changes nothing here; it only reports that the spa is
-# already in the asked mode. The ECO / DAY codes come from the correlation sessions, with no
-# record of the presses that made them.
+# already in the asked mode. The ECO / DAY codes were matched to the panel display, but the
+# presses that set those modes were not logged.
 HEAT_MODES = {"AUTO": 32, "ECO": 34, "DAY": 36}
 HEAT_EDIT_MISSING = (
     "changing the heat mode is not driven: the HEAT edit has never been recorded at the panel "
