@@ -96,6 +96,13 @@ find A, B and ground on your own board before you connect anything.
 > panel uses. Check polarity, and that the gateway is set to RS485, not RS232. See the
 > disclaimer at the end.
 
+> **Keep the gateway off the internet.** The gateway can write to the spa bus, so treat it as a
+> spa controller. The EW11 tested here (Hi-Flying firmware 1.43.1) looks up its vendor's cloud
+> host, `bridge.iotworkshop.com`, every few seconds, and its settings have no switch to turn
+> that off. Block the module's internet access at your router, both ways, and refuse that name
+> in your DNS. The bridge needs only the LAN. Also change the module's factory web login, and
+> keep its TCP server's client limit low: every client that connects can write to the bus.
+
 ## How to run it
 
 All settings are environment variables; the defaults are placeholders.
